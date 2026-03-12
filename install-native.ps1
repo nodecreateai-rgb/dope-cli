@@ -729,6 +729,7 @@ function Write-OpenClawConfig {
   (Ensure-Map -Parent $skills -Key 'using-superpowers')['enabled'] = $true
   (Ensure-Map -Parent $skills -Key 'agile-codex')['enabled'] = $true
   (Ensure-Map -Parent $skills -Key 'browser-use')['enabled'] = $true
+  (Ensure-Map -Parent $skills -Key 'local-long-memory')['enabled'] = $true
 
   $gatewayBind = if ($script:GatewayBind) { $script:GatewayBind } else { 'loopback' }
   $gatewayPort = $script:GatewayPort
@@ -811,11 +812,12 @@ function Install-LocalSkills {
   $using = Join-Path $script:BundledSkillsDir 'using-superpowers'
   $agile = Join-Path $script:BundledSkillsDir 'agile-codex'
   $browser = Join-Path $script:BundledSkillsDir 'browser-use'
-  if (-not (Test-Path $using) -or -not (Test-Path $agile) -or -not (Test-Path $browser)) {
+  $memory = Join-Path $script:BundledSkillsDir 'local-long-memory'
+  if (-not (Test-Path $using) -or -not (Test-Path $agile) -or -not (Test-Path $browser) -or -not (Test-Path $memory)) {
     throw "missing bundled skills under $script:BundledSkillsDir"
   }
   New-Item -ItemType Directory -Force -Path $script:SkillsDir | Out-Null
-  foreach ($skill in @('using-superpowers', 'agile-codex', 'browser-use')) {
+  foreach ($skill in @('using-superpowers', 'agile-codex', 'browser-use', 'local-long-memory')) {
     $target = Join-Path $script:SkillsDir $skill
     if (Test-Path $target) {
       Remove-Item -Recurse -Force -Path $target
@@ -824,6 +826,7 @@ function Install-LocalSkills {
   Copy-Item -Recurse -Force -Path $using -Destination (Join-Path $script:SkillsDir 'using-superpowers')
   Copy-Item -Recurse -Force -Path $agile -Destination (Join-Path $script:SkillsDir 'agile-codex')
   Copy-Item -Recurse -Force -Path $browser -Destination (Join-Path $script:SkillsDir 'browser-use')
+  Copy-Item -Recurse -Force -Path $memory -Destination (Join-Path $script:SkillsDir 'local-long-memory')
 }
 
 function Write-BrowserUseSkillConfig {
@@ -1018,6 +1021,8 @@ function Self-Check {
   if (-not (Test-Path (Join-Path $script:SkillsDir 'agile-codex/SKILL.md'))) { throw 'agile-codex install failed' }
   if (-not (Test-Path (Join-Path $script:SkillsDir 'agile-codex/scripts/agile_codex_backend.py'))) { throw 'agile-codex backend install failed' }
   if (-not (Test-Path (Join-Path $script:SkillsDir 'browser-use/SKILL.md'))) { throw 'browser-use install failed' }
+  if (-not (Test-Path (Join-Path $script:SkillsDir 'local-long-memory/SKILL.md'))) { throw 'local-long-memory install failed' }
+  if (-not (Test-Path (Join-Path $script:SkillsDir 'local-long-memory/scripts/memory_core.py'))) { throw 'local-long-memory core install failed' }
 
   $cfgFinal = Read-JsonFile -Path $script:ConfigPath -Default @{}
   $feishuFinal = @{}
@@ -1036,6 +1041,7 @@ function Self-Check {
     using_superpowers = $cfgFinal['skills']['entries']['using-superpowers']['enabled']
     agile_codex = $cfgFinal['skills']['entries']['agile-codex']['enabled']
     browser_use = $cfgFinal['skills']['entries']['browser-use']['enabled']
+    local_long_memory = $cfgFinal['skills']['entries']['local-long-memory']['enabled']
     feishu = @{
       enabled = $feishuFinal['enabled']
       appId = $feishuFinal['appId']
@@ -1245,6 +1251,9 @@ function Run-TenantMode {
     createdAt = $createdAt
     expiresAt = $expiresAt
     vncPassword = $tenantVncPassword
+    baseUrl = $effectiveBase
+    model = $effectiveModel
+    feishuAppId = $tenantFeishuAppId
   }
   if ($tenantProxyPort) {
     $tenantState['proxyPort'] = $tenantProxyPort

@@ -724,6 +724,7 @@ skills = cfg.setdefault('skills', {}).setdefault('entries', {})
 skills.setdefault('using-superpowers', {})['enabled'] = True
 skills.setdefault('agile-codex', {})['enabled'] = True
 skills.setdefault('browser-use', {})['enabled'] = True
+skills.setdefault('local-long-memory', {})['enabled'] = True
 gateway = cfg.setdefault('gateway', {})
 gateway['port'] = gateway_port
 gateway['mode'] = 'local'
@@ -784,16 +785,19 @@ EOF
 }
 
 install_local_skills() {
-  if [[ ! -d "$BUNDLED_SKILLS_DIR/using-superpowers" || ! -d "$BUNDLED_SKILLS_DIR/agile-codex" || ! -d "$BUNDLED_SKILLS_DIR/browser-use" ]]; then
+  if [[ ! -d "$BUNDLED_SKILLS_DIR/using-superpowers" || ! -d "$BUNDLED_SKILLS_DIR/agile-codex" || ! -d "$BUNDLED_SKILLS_DIR/browser-use" || ! -d "$BUNDLED_SKILLS_DIR/local-long-memory" ]]; then
     echo "missing bundled skills under $BUNDLED_SKILLS_DIR" >&2
     exit 1
   fi
   mkdir -p "$SKILLS_DIR"
-  rm -rf "$SKILLS_DIR/using-superpowers" "$SKILLS_DIR/agile-codex" "$SKILLS_DIR/browser-use"
+  rm -rf "$SKILLS_DIR/using-superpowers" "$SKILLS_DIR/agile-codex" "$SKILLS_DIR/browser-use" "$SKILLS_DIR/local-long-memory"
   cp -a "$BUNDLED_SKILLS_DIR/using-superpowers" "$SKILLS_DIR/using-superpowers"
   cp -a "$BUNDLED_SKILLS_DIR/agile-codex" "$SKILLS_DIR/agile-codex"
   cp -a "$BUNDLED_SKILLS_DIR/browser-use" "$SKILLS_DIR/browser-use"
+  cp -a "$BUNDLED_SKILLS_DIR/local-long-memory" "$SKILLS_DIR/local-long-memory"
   find "$SKILLS_DIR/agile-codex/scripts" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} +
+  find "$SKILLS_DIR/local-long-memory/scripts" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} + 2>/dev/null || true
+  find "$SKILLS_DIR/local-long-memory/tests" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} + 2>/dev/null || true
   mkdir -p "$AGILE_CODEX_RUNTIME_DIR"
   echo "installed local skills into $SKILLS_DIR"
 }
@@ -1295,6 +1299,7 @@ print(json.dumps({
   'using-superpowers': cfg.get('skills',{}).get('entries',{}).get('using-superpowers',{}).get('enabled'),
   'agile-codex': cfg.get('skills',{}).get('entries',{}).get('agile-codex',{}).get('enabled'),
   'browser-use': cfg.get('skills',{}).get('entries',{}).get('browser-use',{}).get('enabled'),
+  'local-long-memory': cfg.get('skills',{}).get('entries',{}).get('local-long-memory',{}).get('enabled'),
   'skillsDirExists': Path(${SKILLS_DIR@Q}).exists(),
   'agileCodexPlatform': platform,
   'feishu': {
@@ -1311,7 +1316,9 @@ PY
   test -f "$SKILLS_DIR/using-superpowers/SKILL.md"
   test -f "$SKILLS_DIR/agile-codex/SKILL.md"
   test -f "$SKILLS_DIR/browser-use/SKILL.md"
+  test -f "$SKILLS_DIR/local-long-memory/SKILL.md"
   test -f "$SKILLS_DIR/agile-codex/scripts/agile_codex_backend.py"
+  test -f "$SKILLS_DIR/local-long-memory/scripts/memory_core.py"
   openclaw agent --agent main -m "Reply with exactly INSTALLER_SMOKE_OK and nothing else." --json --timeout 60 >/tmp/openclaw-native-smoke.json 2>&1 || true
   tail -n 40 /tmp/openclaw-native-smoke.json
   openclaw cron list --json >/tmp/openclaw-native-cron.json 2>&1 || true
