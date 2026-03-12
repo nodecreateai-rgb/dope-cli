@@ -18,7 +18,7 @@
 
 - 需要跨会话保留长期记忆
 - 需要多任务并发时保持状态准确
-- 需要为 OpenClaw / dope CLI 提供可解释、可查询的本地 memory core
+- 需要为 OpenClaw / 安装后的运行时提供可解释、可查询的本地 memory core
 
 ## 设计原则
 
@@ -63,6 +63,27 @@
 - 避免多任务/多会话串味
 - 保持查询快
 - 让 summary 只是压缩视图，不是真相源
+
+## 会话前按需查询接入
+
+`local-long-memory` 不应停留在“有脚本可手动调用”。
+正确接法是：
+
+- 在 OpenClaw 的 `agent:bootstrap` 阶段运行一个 preload hook
+- 从当前 session 的最近用户消息提取 query basis
+- 优先按 `session_key` / `task_id` scoped recall
+- 再做小范围 FTS 搜索
+- 生成一个短小的 `Dynamic Memory Bundle`
+- 注入到当前轮的 `MEMORY.md` 上下文中
+
+对应 hook：
+- `hooks/memory-preload-bundle/HOOK.md`
+- `hooks/memory-preload-bundle/handler.js`
+
+### 这条路径的意义
+- 每轮都能按需召回，而不是靠模型“自己记得查”
+- 默认查询是 scoped 的，速度和准确性都更稳
+- 不需要把整份 daily memory / transcript 全量塞进 prompt
 
 ## 当前 MVP 能力
 
@@ -133,6 +154,7 @@ python3 scripts/memory_core.py finalize-task --task-id dope-release --source mai
 - task/session/scope 索引
 - append-friendly schema
 - summary 与事实分层
+- bootstrap preload hook 只生成小 bundle
 
 ## 数据模型
 
@@ -166,5 +188,5 @@ python3 scripts/memory_core.py finalize-task --task-id dope-release --source mai
 - local embeddings
 - conflict check
 - stale fact pruning
-- OpenClaw 会话前自动按 task/session 查询
-- dope CLI 子命令集成
+- 更强的 task id 推断
+- session transcript -> event distill

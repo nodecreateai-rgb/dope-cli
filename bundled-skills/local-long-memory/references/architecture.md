@@ -13,6 +13,7 @@
 4. Query is always scoped when possible
 5. Summary is cache, not truth
 6. High-confidence data is written immediately; summaries are finalized later
+7. Retrieval should happen before a run via a small injected bundle, not by dumping the whole DB into context
 
 ## Storage
 
@@ -36,10 +37,17 @@ Each row includes:
 
 ## Query path
 
-1. exact scope filter (`task_id`, `session_key`, `scope`) first
-2. FTS retrieval second
-3. sort by recency + confidence
-4. return structured rows, not only prose
+### write path
+- validated facts -> immediate fact/task/event writes
+- unstable or aggregate understanding -> summary/finalize later
+
+### read path
+1. derive query basis from recent user text
+2. infer possible `task_id`
+3. exact scope filter (`task_id`, `session_key`, `scope`) first
+4. FTS retrieval second
+5. sort by recency + confidence
+6. inject only a small memory bundle into the current run
 
 ## Accuracy strategy
 
@@ -49,23 +57,18 @@ Each row includes:
 - summaries never overwrite facts
 - future conflict detection can compare rows with same key/task_id
 
-## Write strategy
+## Runtime integration
 
-### immediate writes
-Use for:
-- validated facts
-- task state transitions
-- explicit user preferences
-- successful / failed execution events
+Recommended runtime integration is an `agent:bootstrap` hook:
 
-### delayed finalization
-Use for:
-- case summaries
-- stage summaries
-- task completion summaries
-- repeated successful patterns
+- read current session file
+- extract the last few user messages
+- generate a narrow query basis
+- recall session/task scoped rows first
+- build a small markdown bundle
+- append that bundle to injected `MEMORY.md`
 
-This avoids long-term memory becoming a raw transcript dump.
+This keeps the experience fast and automatic without bloating prompt context.
 
 ## Why this stays fast
 
@@ -75,6 +78,7 @@ This avoids long-term memory becoming a raw transcript dump.
 - no embedding model in MVP
 - exact scope filters reduce search space before FTS
 - indexes on task/session/scope/updated_at
+- injected bundle stays small
 
 ## Operational rule
 
