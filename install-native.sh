@@ -8,6 +8,7 @@ CODEX_NPM_PACKAGE="${CODEX_NPM_PACKAGE:-@openai/codex@latest}"
 PROVIDER="default"
 WORKSPACE="${OPENCLAW_WORKSPACE:-$HOME/.openclaw}"
 SKILLS_DIR="$HOME/.openclaw/skills"
+HOOKS_DIR="$HOME/.openclaw/hooks"
 BUNDLED_SKILLS_DIR="${BUNDLED_SKILLS_DIR:-$SCRIPT_DIR/bundled-skills}"
 AGILE_CODEX_RUNTIME_DIR="${AGILE_CODEX_RUNTIME_DIR:-$SKILLS_DIR/agile-codex/runtime}"
 AGILE_CODEX_MONITOR_NAME="${AGILE_CODEX_MONITOR_NAME:-Agile Codex progress monitor}"
@@ -517,6 +518,7 @@ bootstrap_if_missing() {
   mkdir -p "$(dirname "$CONFIG_PATH")"
   mkdir -p "$WORKSPACE"
   mkdir -p "$SKILLS_DIR"
+  mkdir -p "$HOOKS_DIR"
   mkdir -p "$WORKSPACE/memory"
   if [[ ! -f "$WORKSPACE/MEMORY.md" ]]; then
     printf '# MEMORY.md\n\n## Long-term Memory\n\n' > "$WORKSPACE/MEMORY.md"
@@ -720,6 +722,15 @@ hooks['enabled'] = True
 hook_entries = hooks.setdefault('entries', {})
 for name in ('boot-md', 'bootstrap-extra-files', 'command-logger', 'session-memory'):
   hook_entries.setdefault(name, {})['enabled'] = True
+hook_entries.setdefault('memory-preload-bundle', {})['enabled'] = True
+hook_entries['memory-preload-bundle'].setdefault('memoryDbPath', str(Path(workspace) / 'skills' / 'local-long-memory' / 'data' / 'memory.db'))
+hook_entries['memory-preload-bundle'].setdefault('recentMessages', 4)
+hook_entries['memory-preload-bundle'].setdefault('sessionItems', 6)
+hook_entries['memory-preload-bundle'].setdefault('taskItems', 8)
+hook_entries['memory-preload-bundle'].setdefault('searchItems', 6)
+hook_entries['memory-preload-bundle'].setdefault('maxTaskIds', 3)
+hook_entries['memory-preload-bundle'].setdefault('maxChars', 4000)
+hook_entries['memory-preload-bundle'].setdefault('dmOnly', True)
 skills = cfg.setdefault('skills', {}).setdefault('entries', {})
 skills.setdefault('using-superpowers', {})['enabled'] = True
 skills.setdefault('agile-codex', {})['enabled'] = True
@@ -795,6 +806,11 @@ install_local_skills() {
   cp -a "$BUNDLED_SKILLS_DIR/agile-codex" "$SKILLS_DIR/agile-codex"
   cp -a "$BUNDLED_SKILLS_DIR/browser-use" "$SKILLS_DIR/browser-use"
   cp -a "$BUNDLED_SKILLS_DIR/local-long-memory" "$SKILLS_DIR/local-long-memory"
+  mkdir -p "$HOOKS_DIR"
+  rm -rf "$HOOKS_DIR/memory-preload-bundle"
+  if [[ -d "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-preload-bundle" ]]; then
+    cp -a "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-preload-bundle" "$HOOKS_DIR/memory-preload-bundle"
+  fi
   find "$SKILLS_DIR/agile-codex/scripts" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} +
   find "$SKILLS_DIR/local-long-memory/scripts" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} + 2>/dev/null || true
   find "$SKILLS_DIR/local-long-memory/tests" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} + 2>/dev/null || true
