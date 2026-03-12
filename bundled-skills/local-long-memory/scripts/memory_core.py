@@ -183,24 +183,54 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 
 def current_fact(conn: sqlite3.Connection, key: str, session_key: str = '', task_id: str = '') -> sqlite3.Row | None:
-    params: list[object] = [key]
-    clauses = ['f.key = ?']
-    if task_id:
-        clauses.append('(f.task_id = ? OR f.task_id = \'\')')
-        params.append(task_id)
+    candidates: list[tuple[str, list[object]]] = []
     if session_key:
-        clauses.append('(f.session_key = ? OR f.session_key = \'\')')
-        params.append(session_key)
-    where = ' AND '.join(clauses)
-    sql = f'''
-      SELECT f.*
-      FROM facts f
-      LEFT JOIN facts newer ON newer.supersedes = f.id
-      WHERE {where} AND newer.id IS NULL
-      ORDER BY f.updated_at DESC, f.id DESC
-      LIMIT 1
-    '''
-    return conn.execute(sql, params).fetchone()
+        candidates.append(
+            (
+                '''
+                SELECT f.*
+                FROM facts f
+                LEFT JOIN facts newer ON newer.supersedes = f.id
+                WHERE f.key = ? AND f.session_key = ? AND newer.id IS NULL
+                ORDER BY f.updated_at DESC, f.id DESC
+                LIMIT 1
+                ''',
+                [key, session_key],
+            )
+        )
+    if task_id:
+        candidates.append(
+            (
+                '''
+                SELECT f.*
+                FROM facts f
+                LEFT JOIN facts newer ON newer.supersedes = f.id
+                WHERE f.key = ? AND f.task_id = ? AND f.session_key = '' AND newer.id IS NULL
+                ORDER BY f.updated_at DESC, f.id DESC
+                LIMIT 1
+                ''',
+                [key, task_id],
+            )
+        )
+    candidates.append(
+        (
+            '''
+            SELECT f.*
+            FROM facts f
+            LEFT JOIN facts newer ON newer.supersedes = f.id
+            WHERE f.key = ? AND f.task_id = '' AND f.session_key = '' AND newer.id IS NULL
+            ORDER BY f.updated_at DESC, f.id DESC
+            LIMIT 1
+            ''',
+            [key],
+        )
+    )
+
+    for sql, params in candidates:
+        row = conn.execute(sql, params).fetchone()
+        if row:
+            return row
+    return None
 
 
 def put_fact(args: argparse.Namespace) -> int:

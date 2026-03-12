@@ -197,6 +197,12 @@ function recencyBonus(row) {
   return Math.max(0, 12 - ageHours * 0.25);
 }
 
+function scopePriority(row, sessionKey, inferredTaskIds) {
+  if (row.session_key && row.session_key === sessionKey) return 3;
+  if (row.task_id && inferredTaskIds.includes(row.task_id)) return 2;
+  return 1;
+}
+
 function intentBonus(row, intent) {
   const title = normalize(row.title || '');
   const kind = row.kind;
@@ -227,6 +233,8 @@ function intentBonus(row, intent) {
 function scoreRow(row, queryText, queryTokens, inferredTaskIds, sessionKey, intent) {
   const hay = normalize(`${row.title || ''} ${row.value || ''} ${row.task_id || ''} ${row.scope || ''}`);
   let score = Number(row.confidence || 0) * 100;
+  const scopeLevel = scopePriority(row, sessionKey, inferredTaskIds);
+  score += scopeLevel * 22;
   if (row.kind === 'fact') score += 40;
   else if (row.kind === 'event') score += 18;
   else if (row.kind === 'task_state') score += 14;
