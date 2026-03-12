@@ -50,6 +50,8 @@
 - `facts`
 - `events`
 
+其中偏好/规则/默认类 fact 使用稳定 key，并允许新值 supersede 旧值。
+
 #### B. 阶段收敛（session:compact:after）
 在会话压缩/阶段结束后，把阶段理解沉淀为：
 - `summaries`
@@ -68,66 +70,17 @@
 - 从当前 session 的最近用户消息提取 query basis
 - 优先按 `session_key` / `task_id` scoped recall
 - 再做小范围 FTS 搜索
+- 对结果按相关性 + 可信度 + 类型 + 时效做排序
 - 生成一个短小的 `Dynamic Memory Bundle`
 - 注入到当前轮的 `MEMORY.md` 上下文中
 
-对应 hook：
-- `hooks/memory-preload-bundle/HOOK.md`
-- `hooks/memory-preload-bundle/handler.js`
+## 召回时效规则
 
-## 自动写入接入
+- 运行态/短期状态：降权更快
+- 摘要：中等衰减
+- 偏好/规则/默认：降权更慢
 
-对应 hook：
-- `hooks/memory-auto-capture/HOOK.md`
-- `hooks/memory-auto-capture/handler.js`
-
-职责：
-- 在 `message:preprocessed` 事件中抓高信号 facts/events
-- 在 `session:compact:after` 事件中写 summary
-
-## 当前 MVP 能力
-
-使用脚本：`scripts/memory_core.py`
-
-### 1. 写入事实
-```bash
-python3 scripts/memory_core.py put-fact \
-  --key repo.dope.url \
-  --value https://github.com/nodecreateai-rgb/dope-cli \
-  --source main \
-  --scope global
-```
-
-### 2. 写入任务状态
-```bash
-python3 scripts/memory_core.py put-task \
-  --task-id dope-release \
-  --status completed \
-  --value "dope cli linux real proxy tenant create passed" \
-  --source main
-```
-
-### 3. 写入事件
-```bash
-python3 scripts/memory_core.py put-event \
-  --task-id dope-release \
-  --event-type test_passed \
-  --value "multi tenant isolation passed" \
-  --source main \
-  --session-key main-session
-```
-
-### 4. 搜索
-```bash
-python3 scripts/memory_core.py search --query "tenant renew" --task-id dope-release --limit 5
-```
-
-### 5. 按 task 取上下文
-```bash
-python3 scripts/memory_core.py context --task-id dope-release --limit 20
-```
-
-### 6. 任务收敛成长期摘要
-```bash
-python3 scripts/memory_core.py finalize-task --task-id dope-release --source main
-```
+目的是：
+- 长期仍然快
+- 不让旧的临时状态长期霸榜
+- 让稳定偏好更容易被召回

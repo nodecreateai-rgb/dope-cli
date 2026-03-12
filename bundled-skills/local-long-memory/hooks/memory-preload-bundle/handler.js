@@ -114,7 +114,7 @@ function querySessionRows(db, sessionKey, limit) {
   if (!sessionKey) return [];
   return db.prepare(`
     SELECT * FROM (
-      SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM facts WHERE session_key = ?
+      SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM facts WHERE session_key = ? AND id NOT IN (SELECT supersedes FROM facts WHERE supersedes IS NOT NULL)
       UNION ALL
       SELECT 'task_state' AS kind, id, status AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM task_state WHERE session_key = ?
       UNION ALL
@@ -128,7 +128,7 @@ function querySessionRows(db, sessionKey, limit) {
 function queryTaskRows(db, taskId, limit) {
   return db.prepare(`
     SELECT * FROM (
-      SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM facts WHERE task_id = ?
+      SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM facts WHERE task_id = ? AND id NOT IN (SELECT supersedes FROM facts WHERE supersedes IS NOT NULL)
       UNION ALL
       SELECT 'task_state' AS kind, id, status AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM task_state WHERE task_id = ?
       UNION ALL
@@ -146,7 +146,8 @@ function querySearchRows(db, tokens, limit) {
   const queries = [
     `SELECT 'fact' AS kind, base.id, base.key AS title, base.value, base.scope, base.source, base.session_key, base.task_id, base.confidence, base.updated_at
      FROM facts_fts idx JOIN facts base ON base.id = idx.rowid
-     WHERE facts_fts MATCH ? ORDER BY base.updated_at DESC LIMIT ?`,
+     LEFT JOIN facts newer ON newer.supersedes = base.id
+     WHERE facts_fts MATCH ? AND newer.id IS NULL ORDER BY base.updated_at DESC LIMIT ?`,
     `SELECT 'task_state' AS kind, base.id, base.status AS title, base.value, base.scope, base.source, base.session_key, base.task_id, base.confidence, base.updated_at
      FROM task_state_fts idx JOIN task_state base ON base.id = idx.rowid
      WHERE task_state_fts MATCH ? ORDER BY base.updated_at DESC LIMIT ?`,
@@ -165,24 +166,46 @@ function querySearchRows(db, tokens, limit) {
   return rows;
 }
 
+function classifyRecency(row) {
+  const title = normalize(row.title || '');
+  const value = normalize(row.value || '');
+  if (row.kind === 'event') return 'short';
+  if (row.kind === 'task_state') return 'short';
+  if (title.includes('port') || value.includes('port') || value.includes('gateway') || value.includes('vnc')) return 'short';
+  if (title.includes('preference') || title.includes('rule') || title.includes('remember')) return 'long';
+  if (row.kind === 'fact') return 'medium';
+  if (row.kind === 'summary') return 'medium';
+  return 'medium';
+}
+
+function recencyBonus(row) {
+  const updated = Date.parse(String(row.updated_at || ''));
+  if (Number.isNaN(updated)) return 0;
+  const ageHours = Math.max(0, (Date.now() - updated) / 3600000);
+  const klass = classifyRecency(row);
+  if (klass === 'short') return Math.max(-25, 18 - ageHours * 3.5);
+  if (klass === 'medium') return Math.max(-10, 20 - ageHours * 1.2);
+  return Math.max(0, 12 - ageHours * 0.25);
+}
+
 function scoreRow(row, queryText, queryTokens, inferredTaskIds, sessionKey) {
   const hay = normalize(`${row.title || ''} ${row.value || ''} ${row.task_id || ''} ${row.scope || ''}`);
   let score = Number(row.confidence || 0) * 100;
-  if (row.kind === 'fact') score += 35;
-  else if (row.kind === 'event') score += 20;
-  else if (row.kind === 'task_state') score += 15;
-  else if (row.kind === 'summary') score += 5;
+  if (row.kind === 'fact') score += 40;
+  else if (row.kind === 'event') score += 18;
+  else if (row.kind === 'task_state') score += 14;
+  else if (row.kind === 'summary') score += 8;
+  const title = normalize(row.title || '');
+  if (title.startsWith('preference.')) score += 18;
+  if (title.startsWith('rule.')) score += 16;
+  if (title.startsWith('remember.')) score += 12;
   if (row.session_key && row.session_key === sessionKey) score += 30;
   if (row.task_id && inferredTaskIds.includes(row.task_id)) score += 40;
   if (queryText && hay.includes(queryText)) score += 25;
   for (const token of queryTokens) {
     if (hay.includes(token)) score += 6;
   }
-  const updated = Date.parse(String(row.updated_at || ''));
-  if (!Number.isNaN(updated)) {
-    const ageHours = Math.max(0, (Date.now() - updated) / 3600000);
-    score += Math.max(0, 24 - Math.min(ageHours, 24));
-  }
+  score += recencyBonus(row);
   return score;
 }
 

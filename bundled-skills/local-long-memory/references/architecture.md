@@ -14,6 +14,8 @@
 5. Summary is cache, not truth
 6. High-confidence data is written immediately; summaries are finalized later
 7. Retrieval should happen before a run via a small injected bundle, not by dumping the whole DB into context
+8. Preference/rule/default facts support supersede chains so newer truths win without deleting history
+9. Recency weighting should differ by memory class: short-lived operational state decays faster than durable preferences/rules
 
 ## Write path
 
@@ -28,6 +30,8 @@ Persist only high-signal items such as:
 These become:
 - `facts`
 - `events`
+
+Stable keys should be used for preference/rule/default style facts so new values can supersede older ones.
 
 ### session:compact:after
 Use compaction boundaries to persist:
@@ -44,22 +48,13 @@ These become:
 2. infer possible `task_id`
 3. exact scope filter (`task_id`, `session_key`, `scope`) first
 4. FTS retrieval second
-5. sort by recency + confidence
+5. rank by relevance + confidence + memory type + recency decay
 6. inject only a small memory bundle into the current run
 
-## Why not persist every message
+## Recency policy
 
-Because that would:
-- pollute long-term memory with low-signal chat
-- increase cross-task contamination
-- make retrieval slower and noisier
-- reduce trust in recall quality
+- short-lived state (`events`, `task_state`, ports/runtime state): decay fast
+- medium-lived summaries: moderate decay
+- durable preferences/rules/defaults: slow decay
 
-## Runtime integration
-
-Recommended runtime integration:
-- `message:preprocessed` hook for selective fact/event capture
-- `session:compact:after` hook for summary capture
-- `agent:bootstrap` hook for recall bundle injection
-
-This gives a full write + recall loop without transcript dumping.
+This keeps recall fast while avoiding old operational noise dominating results.
