@@ -146,7 +146,7 @@ function isRecentDuplicate(db, table, fields, dedupeWindowSec) {
 }
 
 function putFactWithSupersede(fact, sessionKey, taskId) {
-  const current = runMemoryJson(['get-current-fact', '--key', fact.stableKey, '--session-key', sessionKey, '--task-id', taskId]);
+  const current = runMemoryJson(['get-current-fact', '--key', fact.stableKey, '--session-key', sessionKey, '--task-id', taskId, '--scope-mode', 'exact']);
   const args = ['put-fact', '--key', fact.stableKey, '--value', fact.value, '--source', 'message:preprocessed', '--session-key', sessionKey, '--task-id', taskId, '--confidence', '0.9'];
   if (current && current.id && current.value !== fact.value) {
     args.push('--supersedes', String(current.id));

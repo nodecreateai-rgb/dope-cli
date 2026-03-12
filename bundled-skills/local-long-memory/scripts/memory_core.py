@@ -182,7 +182,38 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def current_fact(conn: sqlite3.Connection, key: str, session_key: str = '', task_id: str = '') -> sqlite3.Row | None:
+def current_fact(conn: sqlite3.Connection, key: str, session_key: str = '', task_id: str = '', scope_mode: str = 'fallback') -> sqlite3.Row | None:
+    if scope_mode == 'exact':
+        if session_key:
+            sql = '''
+                SELECT f.*
+                FROM facts f
+                LEFT JOIN facts newer ON newer.supersedes = f.id
+                WHERE f.key = ? AND f.session_key = ? AND newer.id IS NULL
+                ORDER BY f.updated_at DESC, f.id DESC
+                LIMIT 1
+            '''
+            return conn.execute(sql, [key, session_key]).fetchone()
+        if task_id:
+            sql = '''
+                SELECT f.*
+                FROM facts f
+                LEFT JOIN facts newer ON newer.supersedes = f.id
+                WHERE f.key = ? AND f.task_id = ? AND f.session_key = '' AND newer.id IS NULL
+                ORDER BY f.updated_at DESC, f.id DESC
+                LIMIT 1
+            '''
+            return conn.execute(sql, [key, task_id]).fetchone()
+        sql = '''
+            SELECT f.*
+            FROM facts f
+            LEFT JOIN facts newer ON newer.supersedes = f.id
+            WHERE f.key = ? AND f.task_id = '' AND f.session_key = '' AND newer.id IS NULL
+            ORDER BY f.updated_at DESC, f.id DESC
+            LIMIT 1
+        '''
+        return conn.execute(sql, [key]).fetchone()
+
     candidates: list[tuple[str, list[object]]] = []
     if session_key:
         candidates.append(
@@ -404,7 +435,7 @@ def finalize_task(args: argparse.Namespace) -> int:
 
 def get_current_fact(args: argparse.Namespace) -> int:
     conn = connect(); init_db(conn)
-    row = current_fact(conn, args.key, args.session_key, args.task_id)
+    row = current_fact(conn, args.key, args.session_key, args.task_id, args.scope_mode)
     print(json.dumps(dict(row) if row else {}, ensure_ascii=False, indent=2))
     return 0
 
@@ -458,6 +489,7 @@ def build_parser() -> argparse.ArgumentParser:
     gf.add_argument('--key', required=True)
     gf.add_argument('--session-key', default='')
     gf.add_argument('--task-id', default='')
+    gf.add_argument('--scope-mode', choices=['fallback', 'exact'], default='fallback')
     gf.set_defaults(handler=get_current_fact)
 
     ft = sub.add_parser('finalize-task')
