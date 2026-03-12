@@ -166,13 +166,22 @@ function querySearchRows(db, tokens, limit) {
   return rows;
 }
 
+function classifyIntent(queryText) {
+  const q = normalize(queryText);
+  if (/(默认|偏好|规则|约定|应该|记住|习惯)/u.test(q)) return 'policy';
+  if (/(验证|测试|通过|失败|结果|成功|报错|error|bug)/u.test(q)) return 'verification';
+  if (/(决定|结论|方案|为什么这样|为何这样)/u.test(q)) return 'decision';
+  if (/(进度|状态|到哪了|目前|现在|当前)/u.test(q)) return 'status';
+  return 'general';
+}
+
 function classifyRecency(row) {
   const title = normalize(row.title || '');
   const value = normalize(row.value || '');
   if (row.kind === 'event') return 'short';
   if (row.kind === 'task_state') return 'short';
   if (title.includes('port') || value.includes('port') || value.includes('gateway') || value.includes('vnc')) return 'short';
-  if (title.includes('preference') || title.includes('rule') || title.includes('remember')) return 'long';
+  if (title.includes('preference') || title.includes('rule') || title.includes('remember') || title.includes('decision') || title.includes('workaround')) return 'long';
   if (row.kind === 'fact') return 'medium';
   if (row.kind === 'summary') return 'medium';
   return 'medium';
@@ -188,7 +197,34 @@ function recencyBonus(row) {
   return Math.max(0, 12 - ageHours * 0.25);
 }
 
-function scoreRow(row, queryText, queryTokens, inferredTaskIds, sessionKey) {
+function intentBonus(row, intent) {
+  const title = normalize(row.title || '');
+  const kind = row.kind;
+  if (intent === 'policy') {
+    if (title.startsWith('preference.') || title.startsWith('rule.') || title.startsWith('remember.')) return 26;
+    if (title.startsWith('decision.') || title.startsWith('workaround.')) return 8;
+    if (kind === 'event' || kind === 'task_state') return -8;
+  }
+  if (intent === 'verification') {
+    if (kind === 'event' && title.startsWith('verification.')) return 28;
+    if (kind === 'task_state') return 10;
+    if (title.startsWith('preference.') || title.startsWith('rule.')) return -6;
+  }
+  if (intent === 'decision') {
+    if (title.startsWith('decision.')) return 24;
+    if (kind === 'summary') return 8;
+    if (kind === 'event' && title.startsWith('decision.')) return 12;
+  }
+  if (intent === 'status') {
+    if (kind === 'task_state') return 24;
+    if (kind === 'event') return 8;
+    if (kind === 'summary') return 6;
+    if (title.startsWith('preference.') || title.startsWith('rule.')) return -8;
+  }
+  return 0;
+}
+
+function scoreRow(row, queryText, queryTokens, inferredTaskIds, sessionKey, intent) {
   const hay = normalize(`${row.title || ''} ${row.value || ''} ${row.task_id || ''} ${row.scope || ''}`);
   let score = Number(row.confidence || 0) * 100;
   if (row.kind === 'fact') score += 40;
@@ -199,12 +235,15 @@ function scoreRow(row, queryText, queryTokens, inferredTaskIds, sessionKey) {
   if (title.startsWith('preference.')) score += 18;
   if (title.startsWith('rule.')) score += 16;
   if (title.startsWith('remember.')) score += 12;
+  if (title.startsWith('decision.')) score += 14;
+  if (title.startsWith('workaround.')) score += 10;
   if (row.session_key && row.session_key === sessionKey) score += 30;
   if (row.task_id && inferredTaskIds.includes(row.task_id)) score += 40;
   if (queryText && hay.includes(queryText)) score += 25;
   for (const token of queryTokens) {
     if (hay.includes(token)) score += 6;
   }
+  score += intentBonus(row, intent);
   score += recencyBonus(row);
   return score;
 }
@@ -212,12 +251,13 @@ function scoreRow(row, queryText, queryTokens, inferredTaskIds, sessionKey) {
 function dedupeAndRankRows(rows, queryText, inferredTaskIds, sessionKey, limit) {
   const seen = new Set();
   const queryTokens = tokenize(queryText);
+  const intent = classifyIntent(queryText);
   const ranked = [];
   for (const row of rows) {
     const key = `${row.kind}:${row.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    ranked.push({ ...row, _score: scoreRow(row, normalize(queryText), queryTokens, inferredTaskIds, sessionKey) });
+    ranked.push({ ...row, _score: scoreRow(row, normalize(queryText), queryTokens, inferredTaskIds, sessionKey, intent) });
   }
   ranked.sort((a, b) => b._score - a._score || String(b.updated_at).localeCompare(String(a.updated_at)));
   return ranked.slice(0, limit);
@@ -289,6 +329,7 @@ export default async function memoryPreloadBundleHook(event) {
     sections.push('Generated from local-long-memory before this turn.');
     sections.push(`- recent query basis: ${redact(queryText).replace(/\s+/g, ' ').slice(0, 280)}`);
     if (taskIds.length) sections.push(`- inferred task ids: ${taskIds.join(', ')}`);
+    sections.push(`- inferred recall intent: ${classifyIntent(queryText)}`);
 
     if (sessionScoped.length) {
       sections.push('\n### Session-scoped recall');

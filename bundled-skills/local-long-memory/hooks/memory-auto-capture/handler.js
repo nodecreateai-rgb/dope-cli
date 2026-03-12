@@ -70,6 +70,8 @@ function classifyFact(text) {
     { kind: 'default', key: 'preference.default', re: /^(?:以后默认|默认)[:：]?\s*(.+)$/u },
     { kind: 'preference', key: 'preference.user', re: /^(?:偏好|我偏好|我的偏好)[:：]?\s*(.+)$/u },
     { kind: 'rule', key: 'rule.explicit', re: /^(?:约定|规则)[:：]?\s*(.+)$/u },
+    { kind: 'decision', key: 'decision.explicit', re: /^(?:决定|决策|结论)[:：]?\s*(.+)$/u },
+    { kind: 'workaround', key: 'workaround.explicit', re: /^(?:临时方案|绕过方案|workaround)[:：]?\s*(.+)$/iu },
   ];
   for (const item of patterns) {
     const m = raw.match(item.re);
@@ -81,9 +83,11 @@ function classifyFact(text) {
 function maybeCaptureEvent(text) {
   const raw = String(text || '').trim();
   const pass = raw.match(/^(?:验证通过|测试通过|成功了|已验证|验证成功)[:：]?\s*(.+)$/u);
-  if (pass) return { type: 'verified_result', value: pass[1].trim(), confidence: '0.95' };
+  if (pass) return { type: 'verification.pass', value: pass[1].trim(), confidence: '0.95' };
   const fail = raw.match(/^(?:失败了|测试失败|验证失败)[:：]?\s*(.+)$/u);
-  if (fail) return { type: 'failure_result', value: fail[1].trim(), confidence: '0.95' };
+  if (fail) return { type: 'verification.fail', value: fail[1].trim(), confidence: '0.95' };
+  const decided = raw.match(/^(?:已决定|最终决定)[:：]?\s*(.+)$/u);
+  if (decided) return { type: 'decision.recorded', value: decided[1].trim(), confidence: '0.9' };
   return null;
 }
 
