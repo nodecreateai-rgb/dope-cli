@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Basic CLI help
+        shell: bash
+        run: |
+          python3 ./dope --help >/dev/null
+          python3 ./dope tenant renew --help >/dev/null
+      - name: Dry-run create
+        shell: bash
+        run: |
+          python3 ./dope tenant create -d 30m --mode proxy --short-uuid ci01 \
+            --host-base-url http://127.0.0.1:9999/v1 \
+            --host-api-key dummy \
+            --host-model dummy \
+            --non-interactive --dry-run >/dev/null
+      - name: PowerShell launcher
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          ./dope.ps1 --help | Out-Null

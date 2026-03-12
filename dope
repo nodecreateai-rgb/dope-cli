@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parent
+DEFAULT_STATE_ROOT = Path(os.environ.get("DOPE_TENANT_STATE_ROOT", str(Path.home() / ".openclaw" / "tenant-state")))
+LEGACY_DURATION_SECONDS = {
+    "1h": 3600,
+    "2h": 7200,
+    "5h": 18000,
+    "1m": 2592000,
+}
+UNIT_SECONDS = {
+    "s": 1,
+    "sec": 1,
+    "secs": 1,
+    "second": 1,
+    "seconds": 1,
+    "m": 60,
+    "min": 60,
+    "mins": 60,
+    "minute": 60,
+    "minutes": 60,
+    "h": 3600,
+    "hr": 3600,
+    "hrs": 3600,
+    "hour": 3600,
+    "hours": 3600,
+    "d": 86400,
+    "day": 86400,
+    "days": 86400,
+    "w": 604800,
+    "week": 604800,
+    "weeks": 604800,
+    "M": 2592000,
+    "mon": 2592000,
+    "month": 2592000,
+    "months": 2592000,
+}
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def format_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_utc(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def is_windows() -> bool:
+    return os.name == "nt"
+
+
+def resolve_powershell() -> str:
+    for candidate in ("pwsh.exe", "powershell.exe", "pwsh", "powershell"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    raise SystemExit("missing required PowerShell runtime")
+
+
+def resolve_installer() -> list[str]:
+    if is_windows():
+        installer = Path(os.environ.get("DOPE_INSTALLER_PS1") or os.environ.get("DOPE_INSTALLER") or REPO_ROOT / "install-native.ps1")
+        return [resolve_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer)]
+    installer = Path(os.environ.get("DOPE_INSTALLER_SH") or os.environ.get("DOPE_INSTALLER") or REPO_ROOT / "install-native.sh")
+    return ["bash", str(installer)]
+
+
+def resolve_scheduler() -> list[str]:
+    if is_windows():
+        scheduler = Path(os.environ.get("DOPE_TENANT_SCHEDULER_PS1") or os.environ.get("DOPE_TENANT_SCHEDULER") or REPO_ROOT / "scripts" / "tenant-schedule-expiry.ps1")
+        return [resolve_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(scheduler)]
+    scheduler = Path(os.environ.get("DOPE_TENANT_SCHEDULER_SH") or os.environ.get("DOPE_TENANT_SCHEDULER") or REPO_ROOT / "scripts" / "tenant-schedule-expiry.sh")
+    return ["bash", str(scheduler)]
+
+
+def state_root() -> Path:
+    return DEFAULT_STATE_ROOT
+
+
+def normalize_duration_input(value: str) -> str:
+    text = value.strip()
+    replacements = (
+        ("个月", "M"),
+        ("月", "M"),
+        ("小时", "h"),
+        ("分钟", "m"),
+        ("分", "m"),
+        ("秒钟", "s"),
+        ("秒", "s"),
+        ("天", "d"),
+        ("周", "w"),
+    )
+    for src, dst in replacements:
+        text = text.replace(src, dst)
+    return re.sub(r"[\s,]+", "", text)
+
+
+def parse_duration_label(label: str) -> tuple[str, int]:
+    normalized = normalize_duration_input(label)
+    if not normalized:
+        raise SystemExit("duration is required")
+    if normalized in LEGACY_DURATION_SECONDS:
+        return normalized, LEGACY_DURATION_SECONDS[normalized]
+
+    matches = list(re.finditer(r"(\d+)([A-Za-z]+)", normalized))
+    if not matches or "".join(match.group(0) for match in matches) != normalized:
+        raise SystemExit(f"unsupported duration: {label}")
+
+    canonical_parts: list[str] = []
+    total_seconds = 0
+    for match in matches:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        if amount < 0:
+            raise SystemExit(f"duration must be >= 0: {label}")
+        if unit not in UNIT_SECONDS:
+            raise SystemExit(f"unsupported duration unit in: {label}")
+        total_seconds += amount * UNIT_SECONDS[unit]
+        canonical_parts.append(f"{amount}{unit}")
+
+    if total_seconds <= 0:
+        raise SystemExit(f"duration must be > 0: {label}")
+    return "".join(canonical_parts), total_seconds
+
+
+def duration_to_seconds(label: str | None, seconds: int | None) -> tuple[str, int]:
+    if seconds is not None:
+        if seconds < 0:
+            raise SystemExit(f"seconds must be >= 0: {seconds}")
+        if seconds == 0:
+            raise SystemExit("duration must be > 0")
+        return f"{seconds}s", seconds
+    if not label:
+        raise SystemExit("duration is required")
+    return parse_duration_label(label)
+
+
+def derive_short_uuid(payload: dict[str, Any]) -> str:
+    short_uuid = str(payload.get("shortUuid") or "").strip().lower()
+    if short_uuid:
+        return short_uuid
+    tenant = str(payload.get("tenant") or "")
+    match = re.search(r"-([a-z0-9]{4,})$", tenant.lower())
+    return match.group(1) if match else ""
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_tenants() -> list[dict[str, Any]]:
+    tenants: list[dict[str, Any]] = []
+    root = state_root()
+    if not root.exists():
+        return tenants
+    for tenant_file in root.glob("*/tenant.json"):
+        try:
+            payload = read_json(tenant_file)
+        except Exception:
+            continue
+        tenant_state_dir = tenant_file.parent
+        data_dir = Path(str(payload.get("dataDir") or ""))
+        disabled = (data_dir / "TENANT_DISABLED").exists() if data_dir else False
+        if (tenant_state_dir / "disabled-at").exists():
+            disabled = True
+        tenants.append({
+            "path": tenant_file,
+            "stateDir": tenant_state_dir,
+            "payload": payload,
+            "shortUuid": derive_short_uuid(payload),
+            "disabled": disabled,
+        })
+    tenants.sort(
+        key=lambda item: (
+            parse_utc(str(item["payload"].get("createdAt") or "")) or datetime.fromtimestamp(0, tz=timezone.utc)
+        ),
+        reverse=True,
+    )
+    return tenants
+
+
+def docker_container_state(container_name: str) -> str:
+    if not container_name or not shutil.which("docker"):
+        return ""
+    proc = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Status}}", container_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return (proc.stdout or "").strip()
+
+
+def tenant_row(item: dict[str, Any]) -> dict[str, str]:
+    payload = item["payload"]
+    expires_at = str(payload.get("expiresAt") or "")
+    remaining = ""
+    expires_dt = parse_utc(expires_at)
+    if expires_dt:
+        remaining_seconds = int((expires_dt - utc_now()).total_seconds())
+        remaining = str(remaining_seconds)
+    return {
+        "short_uuid": item["shortUuid"],
+        "tenant": str(payload.get("tenant") or ""),
+        "mode": str(payload.get("modelMode") or ""),
+        "container_state": docker_container_state(str(payload.get("container") or "")) or "unknown",
+        "disabled": "yes" if item["disabled"] else "no",
+        "expires_at": expires_at,
+        "remaining_sec": remaining,
+    }
+
+
+def print_table(rows: list[dict[str, str]]) -> None:
+    if not rows:
+        print("no tenants found")
+        return
+    headers = ["short_uuid", "tenant", "mode", "container_state", "disabled", "expires_at", "remaining_sec"]
+    widths = {header: len(header) for header in headers}
+    for row in rows:
+        for header in headers:
+            widths[header] = max(widths[header], len(row[header]))
+    print("  ".join(header.ljust(widths[header]) for header in headers))
+    print("  ".join("-" * widths[header] for header in headers))
+    for row in rows:
+        print("  ".join(row[header].ljust(widths[header]) for header in headers))
+
+
+def find_tenant(selector: str) -> dict[str, Any]:
+    selector = selector.strip().lower()
+    if not selector:
+        raise SystemExit("tenant selector is required")
+    exact_matches = []
+    prefix_matches = []
+    for item in load_tenants():
+        payload = item["payload"]
+        tenant = str(payload.get("tenant") or "").lower()
+        short_uuid = item["shortUuid"]
+        if selector == tenant or selector == short_uuid:
+            exact_matches.append(item)
+            continue
+        if short_uuid and short_uuid.startswith(selector):
+            prefix_matches.append(item)
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        raise SystemExit(f"tenant selector is ambiguous: {selector}")
+    if len(prefix_matches) == 1:
+        return prefix_matches[0]
+    if len(prefix_matches) > 1:
+        raise SystemExit(f"tenant short uuid prefix is ambiguous: {selector}")
+    raise SystemExit(f"tenant not found: {selector}")
+
+
+def generate_short_uuid(value: str | None) -> str:
+    candidate = re.sub(r"[^a-z0-9]", "", (value or "").strip().lower())
+    import secrets
+    existing = {item["shortUuid"] for item in load_tenants() if item["shortUuid"]}
+    if candidate:
+        if len(candidate) < 4:
+            raise SystemExit("short uuid must be at least 4 lowercase alphanumeric characters")
+        if candidate in existing:
+            raise SystemExit(f"short uuid already exists: {candidate}")
+        return candidate
+    while True:
+        generated = secrets.token_hex(4)
+        if generated not in existing:
+            return generated
+
+
+def require_noninteractive_fields(args: argparse.Namespace, fields: list[str]) -> None:
+    missing = [field for field in fields if not getattr(args, field)]
+    if missing:
+        labels = ", ".join(f"--{field.replace('_', '-')}" for field in missing)
+        raise SystemExit(f"missing required flags for --non-interactive: {labels}")
+
+
+def run_installer(args: argparse.Namespace, env_updates: dict[str, str], short_uuid: str | None = None) -> int:
+    command = resolve_installer()
+    env = os.environ.copy()
+    env.update(env_updates)
+    if args.dry_run:
+        payload = {
+            "command": command,
+            "cwd": str(REPO_ROOT),
+            "env": env_updates,
+        }
+        if short_uuid:
+            payload["shortUuid"] = short_uuid
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    proc = subprocess.run(command, cwd=REPO_ROOT, env=env, check=False)
+    if proc.returncode != 0:
+        return proc.returncode
+    if getattr(args, "json", False) and short_uuid:
+        payload = find_tenant(short_uuid)["payload"]
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_host_create(args: argparse.Namespace) -> int:
+    env_updates = {"INSTALL_MODE": "admin"}
+    if args.non_interactive:
+        require_noninteractive_fields(args, ["base_url", "api_key", "model"])
+        env_updates["TENANT_NONINTERACTIVE"] = "1"
+    if args.base_url:
+        env_updates["TENANT_BASE_URL"] = args.base_url
+    if args.api_key:
+        env_updates["TENANT_API_KEY"] = args.api_key
+    if args.model:
+        env_updates["TENANT_MODEL"] = args.model
+    if args.feishu_app_id:
+        env_updates["TENANT_FEISHU_APP_ID"] = args.feishu_app_id
+    if args.feishu_app_secret:
+        env_updates["TENANT_FEISHU_APP_SECRET"] = args.feishu_app_secret
+    return run_installer(args, env_updates)
+
+
+def cmd_tenant_create(args: argparse.Namespace) -> int:
+    short_uuid = generate_short_uuid(args.short_uuid)
+    duration_label, duration_seconds = duration_to_seconds(args.duration, None)
+    env_updates = {
+        "INSTALL_MODE": "tenant",
+        "TENANT_DURATION_LABEL": duration_label,
+        "TENANT_DURATION_SECONDS": str(duration_seconds),
+        "TENANT_PROXY_MODE": args.mode,
+        "TENANT_SHORT_UUID": short_uuid,
+    }
+    if args.non_interactive:
+        env_updates["TENANT_NONINTERACTIVE"] = "1"
+        if args.mode == "custom":
+            require_noninteractive_fields(args, ["base_url", "api_key", "model"])
+        else:
+            require_noninteractive_fields(args, ["host_base_url", "host_api_key", "host_model"])
+    if args.base_url:
+        env_updates["TENANT_BASE_URL"] = args.base_url
+    if args.api_key:
+        env_updates["TENANT_API_KEY"] = args.api_key
+    if args.model:
+        env_updates["TENANT_MODEL"] = args.model
+    if args.host_base_url:
+        env_updates["TENANT_HOST_BASE_URL"] = args.host_base_url
+    if args.host_api_key:
+        env_updates["TENANT_HOST_API_KEY"] = args.host_api_key
+    if args.host_model:
+        env_updates["TENANT_HOST_MODEL"] = args.host_model
+    if args.feishu_app_id:
+        env_updates["TENANT_FEISHU_APP_ID"] = args.feishu_app_id
+    if args.feishu_app_secret:
+        env_updates["TENANT_FEISHU_APP_SECRET"] = args.feishu_app_secret
+    if args.vnc_password:
+        env_updates["TENANT_VNC_PASSWORD"] = args.vnc_password
+    return run_installer(args, env_updates, short_uuid=short_uuid)
+
+
+def cmd_tenant_list(args: argparse.Namespace) -> int:
+    rows = [tenant_row(item) for item in load_tenants()]
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    print_table(rows)
+    return 0
+
+
+def public_tenant_info(item: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(item["payload"])
+    payload["shortUuid"] = item["shortUuid"]
+    payload["disabled"] = item["disabled"]
+    payload["containerState"] = docker_container_state(str(payload.get("container") or "")) or "unknown"
+    expires_at = str(payload.get("expiresAt") or "")
+    expires_dt = parse_utc(expires_at)
+    if expires_dt:
+        payload["remainingSeconds"] = int((expires_dt - utc_now()).total_seconds())
+
+    if not payload.get("baseUrl") or not payload.get("model") or not payload.get("feishuAppId"):
+        container = str(payload.get("container") or "")
+        if container and shutil.which("docker"):
+            probe = subprocess.run(
+                [
+                    "docker", "exec", container, "python3", "-c",
+                    (
+                        "import json\n"
+                        "from pathlib import Path\n"
+                        "cfg = json.loads(Path('/root/.openclaw/openclaw.json').read_text())\n"
+                        "provider = (((cfg.get('models') or {}).get('providers') or {}).get('default') or {})\n"
+                        "feishu = (((cfg.get('channels') or {}).get('feishu')) or {})\n"
+                        "print(json.dumps({"
+                        "'baseUrl': provider.get('baseUrl'), "
+                        "'model': (((provider.get('models') or [{}])[0]) or {}).get('id') or cfg.get('model'), "
+                        "'feishuAppId': feishu.get('appId')"
+                        "}, ensure_ascii=False))"
+                    ),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+            if probe.returncode == 0 and (probe.stdout or '').strip():
+                try:
+                    live = json.loads((probe.stdout or '').strip())
+                    if live.get('baseUrl') and not payload.get('baseUrl'):
+                        payload['baseUrl'] = live['baseUrl']
+                    if live.get('model') and not payload.get('model'):
+                        payload['model'] = live['model']
+                    if live.get('feishuAppId') and not payload.get('feishuAppId'):
+                        payload['feishuAppId'] = live['feishuAppId']
+                except Exception:
+                    pass
+
+    for secret_key in (
+        "apiKey",
+        "hostApiKey",
+        "tenantApiKey",
+        "feishuAppSecret",
+        "appSecret",
+        "proxyToken",
+    ):
+        payload.pop(secret_key, None)
+    return payload
+
+
+def cmd_tenant_info(args: argparse.Namespace) -> int:
+    tenant = find_tenant(args.selector)
+    payload = public_tenant_info(tenant)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_tenant_renew(args: argparse.Namespace) -> int:
+    tenant = find_tenant(args.selector)
+    payload = tenant["payload"]
+    if tenant["disabled"] and not args.allow_disabled:
+        raise SystemExit("tenant is already disabled; renew only extends active tenants unless --allow-disabled is set")
+
+    renewal_label, duration_seconds = duration_to_seconds(args.duration, args.seconds)
+    now = utc_now()
+    current_expiry = parse_utc(str(payload.get("expiresAt") or "")) or now
+    base_time = now if args.from_now else max(now, current_expiry)
+    new_expiry = base_time + timedelta(seconds=duration_seconds)
+    delay_seconds = max(0, int((new_expiry - now).total_seconds()))
+    state_dir = Path(str(tenant["stateDir"]))
+    scheduler_command = resolve_scheduler()
+    scheduler_args = scheduler_command[:]
+    if is_windows():
+        scheduler_args.extend(["-ContainerName", str(payload.get("container") or ""), "-Seconds", str(delay_seconds), "-StateDir", str(state_dir)])
+    else:
+        scheduler_args.extend([str(payload.get("container") or ""), str(delay_seconds), str(state_dir)])
+
+    updated = dict(payload)
+    updated["shortUuid"] = tenant["shortUuid"]
+    updated["expiresAt"] = format_utc(new_expiry)
+    updated["lastRenewedAt"] = format_utc(now)
+    updated["lastRenewalDurationSeconds"] = duration_seconds
+    updated["lastRenewalDurationLabel"] = renewal_label
+    updated["renewalCount"] = int(updated.get("renewalCount") or 0) + 1
+
+    if args.dry_run:
+        print(json.dumps({
+            "tenant": updated.get("tenant"),
+            "shortUuid": tenant["shortUuid"],
+            "schedulerCommand": scheduler_args,
+            "expiresAt": updated["expiresAt"],
+            "delaySeconds": delay_seconds,
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    proc = subprocess.run(scheduler_args, cwd=REPO_ROOT, check=False)
+    if proc.returncode != 0:
+        return proc.returncode
+    write_json(Path(str(tenant["path"])), updated)
+    if args.json:
+        print(json.dumps(updated, ensure_ascii=False, indent=2))
+    else:
+        print(f"renewed tenant {updated.get('tenant')} ({tenant['shortUuid']})")
+        print(f"expires at (UTC): {updated['expiresAt']}")
+        print(f"renewal seconds: {duration_seconds}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="dope")
+    subparsers = parser.add_subparsers(dest="group", required=True)
+
+    host_parser = subparsers.add_parser("host")
+    host_subparsers = host_parser.add_subparsers(dest="command", required=True)
+    host_create = host_subparsers.add_parser("create")
+    host_create.add_argument("--base-url")
+    host_create.add_argument("--api-key")
+    host_create.add_argument("--model")
+    host_create.add_argument("--feishu-app-id")
+    host_create.add_argument("--feishu-app-secret")
+    host_create.add_argument("--non-interactive", action="store_true")
+    host_create.add_argument("--dry-run", action="store_true")
+    host_create.add_argument("--json", action="store_true")
+    host_create.set_defaults(handler=cmd_host_create)
+
+    tenant_parser = subparsers.add_parser("tenant")
+    tenant_subparsers = tenant_parser.add_subparsers(dest="command", required=True)
+
+    tenant_create = tenant_subparsers.add_parser("create")
+    tenant_create.add_argument("-d", "--duration", default="1h")
+    tenant_create.add_argument("--mode", default="proxy", choices=["proxy", "custom"])
+    tenant_create.add_argument("--short-uuid")
+    tenant_create.add_argument("--base-url")
+    tenant_create.add_argument("--api-key")
+    tenant_create.add_argument("--model")
+    tenant_create.add_argument("--host-base-url")
+    tenant_create.add_argument("--host-api-key")
+    tenant_create.add_argument("--host-model")
+    tenant_create.add_argument("--feishu-app-id")
+    tenant_create.add_argument("--feishu-app-secret")
+    tenant_create.add_argument("--vnc-password")
+    tenant_create.add_argument("--non-interactive", action="store_true")
+    tenant_create.add_argument("--dry-run", action="store_true")
+    tenant_create.add_argument("--json", action="store_true")
+    tenant_create.set_defaults(handler=cmd_tenant_create)
+
+    tenant_list = tenant_subparsers.add_parser("list")
+    tenant_list.add_argument("--json", action="store_true")
+    tenant_list.set_defaults(handler=cmd_tenant_list)
+
+    tenant_info = tenant_subparsers.add_parser("info")
+    tenant_info.add_argument("selector")
+    tenant_info.set_defaults(handler=cmd_tenant_info)
+
+    tenant_renew = tenant_subparsers.add_parser("renew")
+    tenant_renew.add_argument("selector")
+    renewal_amount = tenant_renew.add_mutually_exclusive_group(required=True)
+    renewal_amount.add_argument("-d", "--duration")
+    renewal_amount.add_argument("--seconds", type=int)
+    tenant_renew.add_argument("--from-now", action="store_true")
+    tenant_renew.add_argument("--allow-disabled", action="store_true")
+    tenant_renew.add_argument("--dry-run", action="store_true")
+    tenant_renew.add_argument("--json", action="store_true")
+    tenant_renew.set_defaults(handler=cmd_tenant_renew)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return int(args.handler(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
