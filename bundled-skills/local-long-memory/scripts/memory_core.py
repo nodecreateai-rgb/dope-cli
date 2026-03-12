@@ -331,6 +331,8 @@ def search(args: argparse.Namespace) -> int:
     if args.task_id:
         filters.append(_matches_clause('base', 'task_id'))
         params_tail.append(args.task_id)
+        if not args.session_key:
+            filters.append(" AND base.session_key = '' ")
     if args.session_key:
         filters.append(_matches_clause('base', 'session_key'))
         params_tail.append(args.session_key)
@@ -377,13 +379,13 @@ def context(args: argparse.Namespace) -> int:
     if args.task_id:
         rows = conn.execute(
             '''SELECT * FROM (
-                 SELECT 'task_state' AS kind, id, status AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM task_state WHERE task_id = ?
+                 SELECT 'task_state' AS kind, id, status AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM task_state WHERE task_id = ? AND session_key = ''
                  UNION ALL
-                 SELECT 'summary' AS kind, id, task_id AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM summaries WHERE task_id = ?
+                 SELECT 'summary' AS kind, id, task_id AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM summaries WHERE task_id = ? AND session_key = ''
                  UNION ALL
-                 SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM facts WHERE task_id = ? AND id NOT IN (SELECT supersedes FROM facts WHERE supersedes IS NOT NULL)
+                 SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM facts WHERE task_id = ? AND session_key = '' AND id NOT IN (SELECT supersedes FROM facts WHERE supersedes IS NOT NULL)
                  UNION ALL
-                 SELECT 'event' AS kind, id, event_type AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM events WHERE task_id = ?
+                 SELECT 'event' AS kind, id, event_type AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM events WHERE task_id = ? AND session_key = ''
                ) ORDER BY updated_at DESC LIMIT ?''',
             (args.task_id, args.task_id, args.task_id, args.task_id, args.limit),
         ).fetchall()

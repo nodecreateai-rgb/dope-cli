@@ -127,7 +127,9 @@ function deriveTaskId(text, db, maxCandidates = 5) {
     if (score > 0) scored.push({ taskId, score });
   }
   scored.sort((a, b) => b.score - a.score || a.taskId.localeCompare(b.taskId));
-  return scored.slice(0, maxCandidates)[0]?.taskId || '';
+  const best = scored[0]?.score || 0;
+  const minScore = Math.max(12, best >= 100 ? 16 : Math.floor(best * 0.6));
+  return scored.filter((x) => x.score >= minScore).slice(0, maxCandidates)[0]?.taskId || '';
 }
 
 function isRecentDuplicate(db, table, fields, dedupeWindowSec) {
