@@ -59,9 +59,12 @@ function readRecentUserTexts(sessionFile, maxMessages = 4, scanLines = 60) {
   return recent.reverse();
 }
 
+function normalize(text) {
+  return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
 function tokenize(text) {
-  const tokens = String(text || '')
-    .toLowerCase()
+  const tokens = normalize(text)
     .match(/[\p{L}\p{N}][\p{L}\p{N}._:-]{1,}/gu) || [];
   const stop = new Set(['this','that','with','from','then','have','need','into','true','false','null','local','memory','skill','openclaw','继续','很好','需要','把','这个','进行','真正','接入','会话','查询','流程']);
   return [...new Set(tokens.filter((t) => t.length >= 2 && !stop.has(t)))].slice(0, 24);
@@ -87,7 +90,8 @@ function inferTaskIds(db, text, maxTaskIds) {
     UNION SELECT task_id FROM summaries WHERE task_id != ''
     UNION SELECT task_id FROM events WHERE task_id != ''
   `).all();
-  const hay = String(text || '').toLowerCase();
+  const hay = normalize(text);
+  const queryTokens = tokenize(text);
   const taskIds = rows.map((r) => String(r.task_id || '').trim()).filter(Boolean);
   const scored = [];
   for (const taskId of taskIds) {
@@ -95,7 +99,10 @@ function inferTaskIds(db, text, maxTaskIds) {
     let score = 0;
     if (hay.includes(lower)) score += 100;
     for (const part of lower.split(/[^a-z0-9]+/).filter(Boolean)) {
-      if (part.length >= 3 && hay.includes(part)) score += 10;
+      if (part.length >= 3 && hay.includes(part)) score += 12;
+    }
+    for (const token of queryTokens) {
+      if (lower.includes(token)) score += 4;
     }
     if (score > 0) scored.push({ taskId, score });
   }
@@ -155,20 +162,42 @@ function querySearchRows(db, tokens, limit) {
       rows.push(...db.prepare(sql).all(expr, limit));
     } catch {}
   }
-  rows.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)) || Number(b.confidence || 0) - Number(a.confidence || 0));
-  return rows.slice(0, limit);
+  return rows;
 }
 
-function dedupeRows(rows) {
+function scoreRow(row, queryText, queryTokens, inferredTaskIds, sessionKey) {
+  const hay = normalize(`${row.title || ''} ${row.value || ''} ${row.task_id || ''} ${row.scope || ''}`);
+  let score = Number(row.confidence || 0) * 100;
+  if (row.kind === 'fact') score += 35;
+  else if (row.kind === 'event') score += 20;
+  else if (row.kind === 'task_state') score += 15;
+  else if (row.kind === 'summary') score += 5;
+  if (row.session_key && row.session_key === sessionKey) score += 30;
+  if (row.task_id && inferredTaskIds.includes(row.task_id)) score += 40;
+  if (queryText && hay.includes(queryText)) score += 25;
+  for (const token of queryTokens) {
+    if (hay.includes(token)) score += 6;
+  }
+  const updated = Date.parse(String(row.updated_at || ''));
+  if (!Number.isNaN(updated)) {
+    const ageHours = Math.max(0, (Date.now() - updated) / 3600000);
+    score += Math.max(0, 24 - Math.min(ageHours, 24));
+  }
+  return score;
+}
+
+function dedupeAndRankRows(rows, queryText, inferredTaskIds, sessionKey, limit) {
   const seen = new Set();
-  const out = [];
+  const queryTokens = tokenize(queryText);
+  const ranked = [];
   for (const row of rows) {
     const key = `${row.kind}:${row.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(row);
+    ranked.push({ ...row, _score: scoreRow(row, normalize(queryText), queryTokens, inferredTaskIds, sessionKey) });
   }
-  return out;
+  ranked.sort((a, b) => b._score - a._score || String(b.updated_at).localeCompare(String(a.updated_at)));
+  return ranked.slice(0, limit);
 }
 
 function renderRows(rows) {
@@ -179,7 +208,7 @@ function renderRows(rows) {
     if (row.title) bits.push(`${row.title}`);
     const head = bits.join(' ');
     const value = redact(String(row.value || '').replace(/\s+/g, ' ').trim()).slice(0, 240);
-    const meta = [row.scope ? `scope=${row.scope}` : '', row.updated_at || ''].filter(Boolean).join(' · ');
+    const meta = [row.scope ? `scope=${row.scope}` : '', row.updated_at || '', row._score != null ? `score=${Math.round(row._score)}` : ''].filter(Boolean).join(' · ');
     return `- ${head}: ${value}${meta ? ` (${meta})` : ''}`;
   }).join('\n');
 }
@@ -222,28 +251,33 @@ export default async function memoryPreloadBundleHook(event) {
   try {
     const tokens = tokenize(queryText);
     const taskIds = inferTaskIds(db, queryText, cfg.maxTaskIds);
-    const sessionRows = dedupeRows(querySessionRows(db, event.sessionKey, cfg.sessionItems));
-    const taskRows = dedupeRows(taskIds.flatMap((taskId) => queryTaskRows(db, taskId, cfg.taskItems)));
-    const searchRows = dedupeRows(querySearchRows(db, tokens, cfg.searchItems));
+    const sessionRows = querySessionRows(db, event.sessionKey, cfg.sessionItems);
+    const taskRows = taskIds.flatMap((taskId) => queryTaskRows(db, taskId, cfg.taskItems));
+    const searchRows = querySearchRows(db, tokens, cfg.searchItems);
+    const ranked = dedupeAndRankRows([...sessionRows, ...taskRows, ...searchRows], queryText, taskIds, event.sessionKey, Math.max(cfg.sessionItems, cfg.taskItems, cfg.searchItems) * 2);
 
-    if (sessionRows.length === 0 && taskRows.length === 0 && searchRows.length === 0) return;
+    if (ranked.length === 0) return;
+
+    const sessionScoped = ranked.filter((row) => row.session_key && row.session_key === event.sessionKey).slice(0, cfg.sessionItems);
+    const taskScoped = ranked.filter((row) => row.task_id && taskIds.includes(row.task_id)).slice(0, cfg.taskItems);
+    const searchHits = ranked.filter((row) => !sessionScoped.includes(row) && !taskScoped.includes(row)).slice(0, cfg.searchItems);
 
     const sections = [];
     sections.push('Generated from local-long-memory before this turn.');
     sections.push(`- recent query basis: ${redact(queryText).replace(/\s+/g, ' ').slice(0, 280)}`);
     if (taskIds.length) sections.push(`- inferred task ids: ${taskIds.join(', ')}`);
 
-    if (sessionRows.length) {
+    if (sessionScoped.length) {
       sections.push('\n### Session-scoped recall');
-      sections.push(renderRows(sessionRows));
+      sections.push(renderRows(sessionScoped));
     }
-    if (taskRows.length) {
+    if (taskScoped.length) {
       sections.push('\n### Task-scoped recall');
-      sections.push(renderRows(taskRows));
+      sections.push(renderRows(taskScoped));
     }
-    if (searchRows.length) {
+    if (searchHits.length) {
       sections.push('\n### Search hits');
-      sections.push(renderRows(searchRows));
+      sections.push(renderRows(searchHits));
     }
 
     const bundle = trimBlock(sections.join('\n'), cfg.maxChars);

@@ -1,12 +1,16 @@
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 
 const HOOK_KEY = 'memory-auto-capture';
+const DEFAULT_DB = '/root/.openclaw/skills/local-long-memory/data/memory.db';
 const DEFAULTS = {
   enabled: true,
   dmOnly: true,
   maxTextLength: 1200,
   allowSummaryOnCompact: true,
+  dedupeWindowSec: 21600,
+  maxTaskCandidates: 5,
 };
 
 function getCfg(cfg) {
@@ -27,8 +31,21 @@ function runMemory(args, cwd = '/root/.openclaw') {
   });
 }
 
+function openDb(dbPath = DEFAULT_DB) {
+  if (!dbPath || !fs.existsSync(dbPath)) return null;
+  try {
+    return new DatabaseSync(dbPath, { open: true, readOnly: true });
+  } catch {
+    return null;
+  }
+}
+
 function sanitize(text, maxLen) {
   return String(text || '').replace(/\s+/g, ' ').trim().slice(0, maxLen);
+}
+
+function normalize(text) {
+  return sanitize(text, 4000).toLowerCase();
 }
 
 function maybeCaptureFact(text) {
@@ -49,14 +66,20 @@ function maybeCaptureFact(text) {
 function maybeCaptureEvent(text) {
   const raw = String(text || '').trim();
   const pass = raw.match(/^(?:验证通过|测试通过|成功了|已验证|验证成功)[:：]?\s*(.+)$/u);
-  if (pass) return { type: 'verified_result', value: pass[1].trim() };
+  if (pass) return { type: 'verified_result', value: pass[1].trim(), confidence: '0.95' };
   const fail = raw.match(/^(?:失败了|测试失败|验证失败)[:：]?\s*(.+)$/u);
-  if (fail) return { type: 'failure_result', value: fail[1].trim() };
+  if (fail) return { type: 'failure_result', value: fail[1].trim(), confidence: '0.95' };
   return null;
 }
 
-function deriveTaskId(text) {
-  const raw = String(text || '').toLowerCase();
+function tokenize(text) {
+  const tokens = normalize(text).match(/[\p{L}\p{N}][\p{L}\p{N}._:-]{1,}/gu) || [];
+  const stop = new Set(['这个', '那个', '以后', '默认', '记住', '验证', '通过', '失败', '请', '一下', '我的', '长期', '记忆', '自动', '写入', '正常', 'works', 'with', 'from', 'that', 'this']);
+  return [...new Set(tokens.filter((t) => t.length >= 2 && !stop.has(t)))].slice(0, 24);
+}
+
+function deriveTaskId(text, db, maxCandidates = 5) {
+  const raw = normalize(text);
   const known = [
     ['dope', 'dope-cli'],
     ['tenant', 'tenant-mode'],
@@ -67,7 +90,46 @@ function deriveTaskId(text) {
   for (const [token, taskId] of known) {
     if (raw.includes(token)) return taskId;
   }
-  return '';
+  if (!db) return '';
+  const rows = db.prepare(`
+    SELECT task_id FROM facts WHERE task_id != ''
+    UNION SELECT task_id FROM task_state WHERE task_id != ''
+    UNION SELECT task_id FROM summaries WHERE task_id != ''
+    UNION SELECT task_id FROM events WHERE task_id != ''
+  `).all();
+  const tokens = tokenize(text);
+  const scored = [];
+  for (const row of rows) {
+    const taskId = String(row.task_id || '').trim();
+    if (!taskId) continue;
+    const lower = taskId.toLowerCase();
+    let score = 0;
+    if (raw.includes(lower)) score += 100;
+    for (const part of lower.split(/[^a-z0-9]+/).filter(Boolean)) {
+      if (part.length >= 3 && raw.includes(part)) score += 12;
+    }
+    for (const token of tokens) {
+      if (lower.includes(token)) score += 4;
+    }
+    if (score > 0) scored.push({ taskId, score });
+  }
+  scored.sort((a, b) => b.score - a.score || a.taskId.localeCompare(b.taskId));
+  return scored.slice(0, maxCandidates)[0]?.taskId || '';
+}
+
+function isRecentDuplicate(db, table, fields, dedupeWindowSec) {
+  if (!db) return false;
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  const threshold = nowEpoch - Math.max(0, Number(dedupeWindowSec || 0));
+  const clauses = Object.keys(fields).map((key) => `${key} = ?`).join(' AND ');
+  const values = Object.values(fields);
+  const sql = `SELECT id FROM ${table} WHERE ${clauses} AND CAST(strftime('%s', updated_at) AS INTEGER) >= ? ORDER BY updated_at DESC LIMIT 1`;
+  try {
+    const row = db.prepare(sql).get(...values, threshold);
+    return Boolean(row);
+  } catch {
+    return false;
+  }
 }
 
 function handleMessagePreprocessed(event) {
@@ -80,17 +142,32 @@ function handleMessagePreprocessed(event) {
   if (!text) return;
 
   const sessionKey = String(event.sessionKey || '');
-  const taskId = deriveTaskId(text);
+  const db = openDb();
+  const taskId = deriveTaskId(text, db, cfg.maxTaskCandidates);
 
-  const factValue = maybeCaptureFact(text);
-  if (factValue) {
-    const key = `chat.fact.${Date.now()}`;
-    runMemory(['put-fact', '--key', key, '--value', factValue, '--source', 'message:preprocessed', '--session-key', sessionKey, '--task-id', taskId]);
-  }
+  try {
+    const factValue = maybeCaptureFact(text);
+    if (factValue) {
+      const normalized = normalize(factValue);
+      const isDup = isRecentDuplicate(db, 'facts', { value: factValue, session_key: sessionKey }, cfg.dedupeWindowSec)
+        || isRecentDuplicate(db, 'facts', { value: factValue, task_id: taskId }, cfg.dedupeWindowSec)
+        || isRecentDuplicate(db, 'facts', { value: normalized }, -1);
+      if (!isDup) {
+        const key = `chat.fact.${Date.now()}`;
+        runMemory(['put-fact', '--key', key, '--value', factValue, '--source', 'message:preprocessed', '--session-key', sessionKey, '--task-id', taskId, '--confidence', '0.9']);
+      }
+    }
 
-  const eventCapture = maybeCaptureEvent(text);
-  if (eventCapture) {
-    runMemory(['put-event', '--event-type', eventCapture.type, '--value', eventCapture.value, '--source', 'message:preprocessed', '--session-key', sessionKey, '--task-id', taskId]);
+    const eventCapture = maybeCaptureEvent(text);
+    if (eventCapture) {
+      const isDup = isRecentDuplicate(db, 'events', { event_type: eventCapture.type, value: eventCapture.value, session_key: sessionKey }, cfg.dedupeWindowSec)
+        || isRecentDuplicate(db, 'events', { event_type: eventCapture.type, value: eventCapture.value, task_id: taskId }, cfg.dedupeWindowSec);
+      if (!isDup) {
+        runMemory(['put-event', '--event-type', eventCapture.type, '--value', eventCapture.value, '--source', 'message:preprocessed', '--session-key', sessionKey, '--task-id', taskId, '--confidence', eventCapture.confidence]);
+      }
+    }
+  } finally {
+    try { db?.close(); } catch {}
   }
 }
 
@@ -105,7 +182,16 @@ function handleSessionCompactAfter(event) {
   if (!sessionKey) return;
 
   const summaryText = sanitize(event.context?.summary || event.context?.compactionSummary || 'session compacted', cfg.maxTextLength);
-  runMemory(['put-summary', '--task-id', taskId, '--value', summaryText, '--source', 'session:compact:after', '--session-key', sessionKey, '--confidence', '0.6']);
+  const db = openDb();
+  try {
+    const isDup = isRecentDuplicate(db, 'summaries', { value: summaryText, session_key: sessionKey }, cfg.dedupeWindowSec)
+      || (taskId ? isRecentDuplicate(db, 'summaries', { value: summaryText, task_id: taskId }, cfg.dedupeWindowSec) : false);
+    if (!isDup) {
+      runMemory(['put-summary', '--task-id', taskId, '--value', summaryText, '--source', 'session:compact:after', '--session-key', sessionKey, '--confidence', '0.6']);
+    }
+  } finally {
+    try { db?.close(); } catch {}
+  }
 }
 
 export default async function memoryAutoCaptureHook(event) {
