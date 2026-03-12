@@ -731,6 +731,10 @@ hook_entries['memory-preload-bundle'].setdefault('searchItems', 6)
 hook_entries['memory-preload-bundle'].setdefault('maxTaskIds', 3)
 hook_entries['memory-preload-bundle'].setdefault('maxChars', 4000)
 hook_entries['memory-preload-bundle'].setdefault('dmOnly', True)
+hook_entries.setdefault('memory-auto-capture', {})['enabled'] = True
+hook_entries['memory-auto-capture'].setdefault('dmOnly', True)
+hook_entries['memory-auto-capture'].setdefault('maxTextLength', 1200)
+hook_entries['memory-auto-capture'].setdefault('allowSummaryOnCompact', True)
 skills = cfg.setdefault('skills', {}).setdefault('entries', {})
 skills.setdefault('using-superpowers', {})['enabled'] = True
 skills.setdefault('agile-codex', {})['enabled'] = True
@@ -810,6 +814,10 @@ install_local_skills() {
   rm -rf "$HOOKS_DIR/memory-preload-bundle"
   if [[ -d "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-preload-bundle" ]]; then
     cp -a "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-preload-bundle" "$HOOKS_DIR/memory-preload-bundle"
+  fi
+  rm -rf "$HOOKS_DIR/memory-auto-capture"
+  if [[ -d "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-auto-capture" ]]; then
+    cp -a "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-auto-capture" "$HOOKS_DIR/memory-auto-capture"
   fi
   find "$SKILLS_DIR/agile-codex/scripts" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} +
   find "$SKILLS_DIR/local-long-memory/scripts" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} + 2>/dev/null || true
