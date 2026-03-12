@@ -107,7 +107,9 @@ function inferTaskIds(db, text, maxTaskIds) {
     if (score > 0) scored.push({ taskId, score });
   }
   scored.sort((a, b) => b.score - a.score || a.taskId.localeCompare(b.taskId));
-  return scored.slice(0, maxTaskIds).map((x) => x.taskId);
+  const best = scored[0]?.score || 0;
+  const minScore = Math.max(12, best >= 100 ? 16 : Math.floor(best * 0.6));
+  return scored.filter((x) => x.score >= minScore).slice(0, maxTaskIds).map((x) => x.taskId);
 }
 
 function querySessionRows(db, sessionKey, limit) {
@@ -128,13 +130,13 @@ function querySessionRows(db, sessionKey, limit) {
 function queryTaskRows(db, taskId, limit) {
   return db.prepare(`
     SELECT * FROM (
-      SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM facts WHERE task_id = ? AND id NOT IN (SELECT supersedes FROM facts WHERE supersedes IS NOT NULL)
+      SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM facts WHERE task_id = ? AND session_key = '' AND id NOT IN (SELECT supersedes FROM facts WHERE supersedes IS NOT NULL)
       UNION ALL
-      SELECT 'task_state' AS kind, id, status AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM task_state WHERE task_id = ?
+      SELECT 'task_state' AS kind, id, status AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM task_state WHERE task_id = ? AND session_key = ''
       UNION ALL
-      SELECT 'summary' AS kind, id, task_id AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM summaries WHERE task_id = ?
+      SELECT 'summary' AS kind, id, task_id AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM summaries WHERE task_id = ? AND session_key = ''
       UNION ALL
-      SELECT 'event' AS kind, id, event_type AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM events WHERE task_id = ?
+      SELECT 'event' AS kind, id, event_type AS title, value, scope, source, session_key, task_id, confidence, updated_at FROM events WHERE task_id = ? AND session_key = ''
     ) ORDER BY updated_at DESC LIMIT ?
   `).all(taskId, taskId, taskId, taskId, limit);
 }
@@ -164,6 +166,16 @@ function querySearchRows(db, tokens, limit) {
     } catch {}
   }
   return rows;
+}
+
+function queryGlobalPolicyRows(db, limit) {
+  return db.prepare(`
+    SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, updated_at
+    FROM facts
+    WHERE session_key = '' AND task_id = '' AND key IN ('preference.default', 'preference.user', 'rule.explicit', 'remember.explicit', 'decision.explicit', 'workaround.explicit')
+      AND id NOT IN (SELECT supersedes FROM facts WHERE supersedes IS NOT NULL)
+    ORDER BY updated_at DESC LIMIT ?
+  `).all(limit);
 }
 
 function classifyIntent(queryText) {
@@ -271,6 +283,12 @@ function dedupeAndRankRows(rows, queryText, inferredTaskIds, sessionKey, limit) 
   return ranked.slice(0, limit);
 }
 
+function isCompatibleSearchHit(row, sessionKey, inferredTaskIds) {
+  if (row.session_key) return row.session_key === sessionKey;
+  if (row.task_id) return inferredTaskIds.includes(row.task_id);
+  return true;
+}
+
 function renderRows(rows) {
   return rows.map((row) => {
     const bits = [];
@@ -322,22 +340,27 @@ export default async function memoryPreloadBundleHook(event) {
   try {
     const tokens = tokenize(queryText);
     const taskIds = inferTaskIds(db, queryText, cfg.maxTaskIds);
+    const intent = classifyIntent(queryText);
     const sessionRows = querySessionRows(db, event.sessionKey, cfg.sessionItems);
     const taskRows = taskIds.flatMap((taskId) => queryTaskRows(db, taskId, cfg.taskItems));
     const searchRows = querySearchRows(db, tokens, cfg.searchItems);
-    const ranked = dedupeAndRankRows([...sessionRows, ...taskRows, ...searchRows], queryText, taskIds, event.sessionKey, Math.max(cfg.sessionItems, cfg.taskItems, cfg.searchItems) * 2);
+    const policyFallbackRows = intent === 'policy' ? queryGlobalPolicyRows(db, Math.max(2, Math.min(4, cfg.searchItems))) : [];
+    const ranked = dedupeAndRankRows([...sessionRows, ...taskRows, ...searchRows, ...policyFallbackRows], queryText, taskIds, event.sessionKey, Math.max(cfg.sessionItems, cfg.taskItems, cfg.searchItems) * 2);
 
     if (ranked.length === 0) return;
 
     const sessionScoped = ranked.filter((row) => row.session_key && row.session_key === event.sessionKey).slice(0, cfg.sessionItems);
-    const taskScoped = ranked.filter((row) => row.task_id && taskIds.includes(row.task_id)).slice(0, cfg.taskItems);
-    const searchHits = ranked.filter((row) => !sessionScoped.includes(row) && !taskScoped.includes(row)).slice(0, cfg.searchItems);
+    const taskScoped = ranked.filter((row) => row.task_id && taskIds.includes(row.task_id) && !row.session_key).slice(0, cfg.taskItems);
+    const searchHits = ranked
+      .filter((row) => !sessionScoped.includes(row) && !taskScoped.includes(row))
+      .filter((row) => isCompatibleSearchHit(row, event.sessionKey, taskIds))
+      .slice(0, cfg.searchItems);
 
     const sections = [];
     sections.push('Generated from local-long-memory before this turn.');
     sections.push(`- recent query basis: ${redact(queryText).replace(/\s+/g, ' ').slice(0, 280)}`);
     if (taskIds.length) sections.push(`- inferred task ids: ${taskIds.join(', ')}`);
-    sections.push(`- inferred recall intent: ${classifyIntent(queryText)}`);
+    sections.push(`- inferred recall intent: ${intent}`);
 
     if (sessionScoped.length) {
       sections.push('\n### Session-scoped recall');
