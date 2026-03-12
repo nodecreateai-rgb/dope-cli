@@ -314,7 +314,20 @@ def run_installer(args: argparse.Namespace, env_updates: dict[str, str], short_u
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
-    proc = subprocess.run(command, cwd=REPO_ROOT, env=env, check=False)
+    child_stdout = None
+    child_stderr = None
+    if getattr(args, "json", False):
+        child_stdout = sys.stderr
+        child_stderr = sys.stderr
+
+    proc = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=child_stdout,
+        stderr=child_stderr,
+        check=False,
+    )
     if proc.returncode != 0:
         return proc.returncode
     if getattr(args, "json", False) and short_uuid:
