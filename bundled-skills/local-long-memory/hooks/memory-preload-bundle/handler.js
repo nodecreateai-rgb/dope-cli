@@ -97,18 +97,24 @@ function inferTaskIds(db, text, maxTaskIds) {
   for (const taskId of taskIds) {
     const lower = taskId.toLowerCase();
     let score = 0;
-    if (hay.includes(lower)) score += 100;
+    const exactTaskMention = hay.includes(lower);
+    if (exactTaskMention) score += 100;
     for (const part of lower.split(/[^a-z0-9]+/).filter(Boolean)) {
       if (part.length >= 3 && hay.includes(part)) score += 12;
     }
     for (const token of queryTokens) {
       if (lower.includes(token)) score += 4;
     }
-    if (score > 0) scored.push({ taskId, score });
+    if (score > 0) scored.push({ taskId, score, exactTaskMention });
   }
   scored.sort((a, b) => b.score - a.score || a.taskId.localeCompare(b.taskId));
-  const best = scored[0]?.score || 0;
-  const minScore = Math.max(12, best >= 100 ? 16 : Math.floor(best * 0.6));
+  if (!scored.length) return [];
+  if (scored[0].exactTaskMention) {
+    const bestScore = scored[0].score;
+    return scored.filter((x) => x.exactTaskMention && x.score === bestScore).slice(0, 1).map((x) => x.taskId);
+  }
+  const best = scored[0].score;
+  const minScore = Math.max(12, Math.floor(best * 0.6));
   return scored.filter((x) => x.score >= minScore).slice(0, maxTaskIds).map((x) => x.taskId);
 }
 
