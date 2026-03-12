@@ -31,6 +31,15 @@ function runMemory(args, cwd = '/root/.openclaw') {
   });
 }
 
+function runMemoryJson(args, cwd = '/root/.openclaw') {
+  const proc = runMemory(args, cwd);
+  try {
+    return JSON.parse(proc.stdout || '{}');
+  } catch {
+    return {};
+  }
+}
+
 function openDb(dbPath = DEFAULT_DB) {
   if (!dbPath || !fs.existsSync(dbPath)) return null;
   try {
@@ -48,19 +57,25 @@ function normalize(text) {
   return sanitize(text, 4000).toLowerCase();
 }
 
-function maybeCaptureFact(text) {
+function tokenize(text) {
+  const tokens = normalize(text).match(/[\p{L}\p{N}][\p{L}\p{N}._:-]{1,}/gu) || [];
+  const stop = new Set(['这个', '那个', '以后', '默认', '记住', '验证', '通过', '失败', '请', '一下', '我的', '长期', '记忆', '自动', '写入', '正常', 'works', 'with', 'from', 'that', 'this']);
+  return [...new Set(tokens.filter((t) => t.length >= 2 && !stop.has(t)))].slice(0, 24);
+}
+
+function classifyFact(text) {
   const raw = String(text || '').trim();
   const patterns = [
-    /^(?:记住|记一下|请记住)[:：]?\s*(.+)$/u,
-    /^(?:以后默认|默认)[:：]?\s*(.+)$/u,
-    /^(?:偏好|我偏好|我的偏好)[:：]?\s*(.+)$/u,
-    /^(?:约定|规则)[:：]?\s*(.+)$/u,
+    { kind: 'remember', key: 'remember.explicit', re: /^(?:记住|记一下|请记住)[:：]?\s*(.+)$/u },
+    { kind: 'default', key: 'preference.default', re: /^(?:以后默认|默认)[:：]?\s*(.+)$/u },
+    { kind: 'preference', key: 'preference.user', re: /^(?:偏好|我偏好|我的偏好)[:：]?\s*(.+)$/u },
+    { kind: 'rule', key: 'rule.explicit', re: /^(?:约定|规则)[:：]?\s*(.+)$/u },
   ];
-  for (const re of patterns) {
-    const m = raw.match(re);
-    if (m) return m[1].trim();
+  for (const item of patterns) {
+    const m = raw.match(item.re);
+    if (m) return { value: m[1].trim(), stableKey: item.key, kind: item.kind };
   }
-  return '';
+  return null;
 }
 
 function maybeCaptureEvent(text) {
@@ -70,12 +85,6 @@ function maybeCaptureEvent(text) {
   const fail = raw.match(/^(?:失败了|测试失败|验证失败)[:：]?\s*(.+)$/u);
   if (fail) return { type: 'failure_result', value: fail[1].trim(), confidence: '0.95' };
   return null;
-}
-
-function tokenize(text) {
-  const tokens = normalize(text).match(/[\p{L}\p{N}][\p{L}\p{N}._:-]{1,}/gu) || [];
-  const stop = new Set(['这个', '那个', '以后', '默认', '记住', '验证', '通过', '失败', '请', '一下', '我的', '长期', '记忆', '自动', '写入', '正常', 'works', 'with', 'from', 'that', 'this']);
-  return [...new Set(tokens.filter((t) => t.length >= 2 && !stop.has(t)))].slice(0, 24);
 }
 
 function deriveTaskId(text, db, maxCandidates = 5) {
@@ -132,6 +141,15 @@ function isRecentDuplicate(db, table, fields, dedupeWindowSec) {
   }
 }
 
+function putFactWithSupersede(fact, sessionKey, taskId) {
+  const current = runMemoryJson(['get-current-fact', '--key', fact.stableKey, '--session-key', sessionKey, '--task-id', taskId]);
+  const args = ['put-fact', '--key', fact.stableKey, '--value', fact.value, '--source', 'message:preprocessed', '--session-key', sessionKey, '--task-id', taskId, '--confidence', '0.9'];
+  if (current && current.id && current.value !== fact.value) {
+    args.push('--supersedes', String(current.id));
+  }
+  runMemory(args);
+}
+
 function handleMessagePreprocessed(event) {
   if (event.type !== 'message' || event.action !== 'preprocessed') return;
   const cfg = getCfg(event.context?.cfg);
@@ -146,15 +164,12 @@ function handleMessagePreprocessed(event) {
   const taskId = deriveTaskId(text, db, cfg.maxTaskCandidates);
 
   try {
-    const factValue = maybeCaptureFact(text);
-    if (factValue) {
-      const normalized = normalize(factValue);
-      const isDup = isRecentDuplicate(db, 'facts', { value: factValue, session_key: sessionKey }, cfg.dedupeWindowSec)
-        || isRecentDuplicate(db, 'facts', { value: factValue, task_id: taskId }, cfg.dedupeWindowSec)
-        || isRecentDuplicate(db, 'facts', { value: normalized }, -1);
+    const fact = classifyFact(text);
+    if (fact) {
+      const isDup = isRecentDuplicate(db, 'facts', { key: fact.stableKey, value: fact.value, session_key: sessionKey }, cfg.dedupeWindowSec)
+        || isRecentDuplicate(db, 'facts', { key: fact.stableKey, value: fact.value, task_id: taskId }, cfg.dedupeWindowSec);
       if (!isDup) {
-        const key = `chat.fact.${Date.now()}`;
-        runMemory(['put-fact', '--key', key, '--value', factValue, '--source', 'message:preprocessed', '--session-key', sessionKey, '--task-id', taskId, '--confidence', '0.9']);
+        putFactWithSupersede(fact, sessionKey, taskId);
       }
     }
 

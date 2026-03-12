@@ -49,6 +49,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_facts_session_key ON facts(session_key);
         CREATE INDEX IF NOT EXISTS idx_facts_scope ON facts(scope);
         CREATE INDEX IF NOT EXISTS idx_facts_updated_at ON facts(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_facts_supersedes ON facts(supersedes);
 
         CREATE TABLE IF NOT EXISTS task_state (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,6 +182,27 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def current_fact(conn: sqlite3.Connection, key: str, session_key: str = '', task_id: str = '') -> sqlite3.Row | None:
+    params: list[object] = [key]
+    clauses = ['f.key = ?']
+    if task_id:
+        clauses.append('(f.task_id = ? OR f.task_id = \'\')')
+        params.append(task_id)
+    if session_key:
+        clauses.append('(f.session_key = ? OR f.session_key = \'\')')
+        params.append(session_key)
+    where = ' AND '.join(clauses)
+    sql = f'''
+      SELECT f.*
+      FROM facts f
+      LEFT JOIN facts newer ON newer.supersedes = f.id
+      WHERE {where} AND newer.id IS NULL
+      ORDER BY f.updated_at DESC, f.id DESC
+      LIMIT 1
+    '''
+    return conn.execute(sql, params).fetchone()
+
+
 def put_fact(args: argparse.Namespace) -> int:
     conn = connect(); init_db(conn)
     ts = now_iso()
@@ -260,7 +282,8 @@ def search(args: argparse.Namespace) -> int:
         ("fact", f'''SELECT 'fact' AS kind, base.id, base.key AS title, base.value, base.scope, base.source, base.session_key, base.task_id,
                              base.confidence, base.created_at, base.updated_at
                       FROM facts_fts idx JOIN facts base ON base.id = idx.rowid
-                      WHERE facts_fts MATCH ? {filter_sql}
+                      LEFT JOIN facts newer ON newer.supersedes = base.id
+                      WHERE facts_fts MATCH ? {filter_sql} AND newer.id IS NULL
                       ORDER BY base.updated_at DESC LIMIT ?'''),
         ("task_state", f'''SELECT 'task_state' AS kind, base.id, base.status AS title, base.value, base.scope, base.source, base.session_key, base.task_id,
                                    base.confidence, base.created_at, base.updated_at
@@ -292,26 +315,28 @@ def context(args: argparse.Namespace) -> int:
     conn = connect(); init_db(conn)
     if args.task_id:
         rows = conn.execute(
-            '''SELECT 'task_state' AS kind, id, status AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM task_state WHERE task_id = ?
-               UNION ALL
-               SELECT 'summary' AS kind, id, task_id AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM summaries WHERE task_id = ?
-               UNION ALL
-               SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM facts WHERE task_id = ?
-               UNION ALL
-               SELECT 'event' AS kind, id, event_type AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM events WHERE task_id = ?
-               ORDER BY updated_at DESC LIMIT ?''',
+            '''SELECT * FROM (
+                 SELECT 'task_state' AS kind, id, status AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM task_state WHERE task_id = ?
+                 UNION ALL
+                 SELECT 'summary' AS kind, id, task_id AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM summaries WHERE task_id = ?
+                 UNION ALL
+                 SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM facts WHERE task_id = ? AND id NOT IN (SELECT supersedes FROM facts WHERE supersedes IS NOT NULL)
+                 UNION ALL
+                 SELECT 'event' AS kind, id, event_type AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM events WHERE task_id = ?
+               ) ORDER BY updated_at DESC LIMIT ?''',
             (args.task_id, args.task_id, args.task_id, args.task_id, args.limit),
         ).fetchall()
     elif args.session_key:
         rows = conn.execute(
-            '''SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM facts WHERE session_key = ?
-               UNION ALL
-               SELECT 'task_state' AS kind, id, status AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM task_state WHERE session_key = ?
-               UNION ALL
-               SELECT 'summary' AS kind, id, task_id AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM summaries WHERE session_key = ?
-               UNION ALL
-               SELECT 'event' AS kind, id, event_type AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM events WHERE session_key = ?
-               ORDER BY updated_at DESC LIMIT ?''',
+            '''SELECT * FROM (
+                 SELECT 'fact' AS kind, id, key AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM facts WHERE session_key = ? AND id NOT IN (SELECT supersedes FROM facts WHERE supersedes IS NOT NULL)
+                 UNION ALL
+                 SELECT 'task_state' AS kind, id, status AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM task_state WHERE session_key = ?
+                 UNION ALL
+                 SELECT 'summary' AS kind, id, task_id AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM summaries WHERE session_key = ?
+                 UNION ALL
+                 SELECT 'event' AS kind, id, event_type AS title, value, scope, source, session_key, task_id, confidence, created_at, updated_at FROM events WHERE session_key = ?
+               ) ORDER BY updated_at DESC LIMIT ?''',
             (args.session_key, args.session_key, args.session_key, args.session_key, args.limit),
         ).fetchall()
     else:
@@ -344,6 +369,13 @@ def finalize_task(args: argparse.Namespace) -> int:
     )
     conn.commit()
     print(json.dumps({'ok': True, 'kind': 'summary', 'task_id': args.task_id, 'value': summary_text}, ensure_ascii=False))
+    return 0
+
+
+def get_current_fact(args: argparse.Namespace) -> int:
+    conn = connect(); init_db(conn)
+    row = current_fact(conn, args.key, args.session_key, args.task_id)
+    print(json.dumps(dict(row) if row else {}, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -391,6 +423,12 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument('--session-key', default='')
     ps.add_argument('--confidence', type=float, default=0.7)
     ps.set_defaults(handler=put_summary)
+
+    gf = sub.add_parser('get-current-fact')
+    gf.add_argument('--key', required=True)
+    gf.add_argument('--session-key', default='')
+    gf.add_argument('--task-id', default='')
+    gf.set_defaults(handler=get_current_fact)
 
     ft = sub.add_parser('finalize-task')
     ft.add_argument('--task-id', required=True)
