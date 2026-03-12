@@ -16,6 +16,8 @@
 7. Retrieval should happen before a run via a small injected bundle, not by dumping the whole DB into context
 8. Preference/rule/default facts support supersede chains so newer truths win without deleting history
 9. Recency weighting should differ by memory class: short-lived operational state decays faster than durable preferences/rules
+10. Scope precedence is explicit: `session > task > global`
+11. Supersede governance is scope-aware: session only supersedes session, task only supersedes task, global only supersedes global
 
 ## Write path
 
@@ -33,6 +35,15 @@ These become:
 
 Stable keys should be used for preference/rule/default style facts so new values can supersede older ones.
 
+### Scope-aware supersede rule
+When storing a new stable-key fact:
+- session-scoped value may supersede only prior rows in the same session scope
+- task-scoped value may supersede only prior rows in the same task scope
+- global value may supersede only prior rows in global scope
+- cross-scope supersede is disallowed by design
+
+This prevents local temporary rules from corrupting broader long-term defaults.
+
 ### session:compact:after
 Use compaction boundaries to persist:
 - stage summaries
@@ -47,9 +58,10 @@ These become:
 1. derive query basis from recent user text
 2. infer possible `task_id`
 3. exact scope filter (`task_id`, `session_key`, `scope`) first
-4. FTS retrieval second
-5. rank by relevance + confidence + memory type + recency decay
-6. inject only a small memory bundle into the current run
+4. fallback precedence uses `session > task > global`
+5. FTS retrieval second
+6. rank by relevance + confidence + memory type + recency decay
+7. inject only a small memory bundle into the current run
 
 ## Recency policy
 

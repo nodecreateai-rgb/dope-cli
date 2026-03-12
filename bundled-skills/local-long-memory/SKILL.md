@@ -28,6 +28,7 @@
 4. **准**：事实、任务状态、事件、摘要分层
 5. **按需查询**：不要每轮全量加载
 6. **可追溯**：每条记录都带 source / session / task / timestamp
+7. **守约**：规则显式化，尤其是 `session > task > global`
 
 ## 写入时机（关键规则）
 
@@ -51,6 +52,13 @@
 - `events`
 
 其中偏好/规则/默认类 fact 使用稳定 key，并允许新值 supersede 旧值。
+
+### Scope 规则（必须遵守）
+- `session > task > global`
+- session 新值只 supersede session 旧值
+- task 新值只 supersede task 旧值
+- global 新值只 supersede global 旧值
+- 不允许跨层级乱覆盖
 
 #### B. 阶段收敛（session:compact:after）
 在会话压缩/阶段结束后，把阶段理解沉淀为：
