@@ -9,9 +9,10 @@
 
 1. SQLite as source of truth
 2. FTS5 for fast lexical retrieval
-3. Facts / task_state / summaries separated
+3. Facts / task_state / events / summaries separated
 4. Query is always scoped when possible
 5. Summary is cache, not truth
+6. High-confidence data is written immediately; summaries are finalized later
 
 ## Storage
 
@@ -19,6 +20,7 @@ Single SQLite database:
 
 - `facts`
 - `task_state`
+- `events`
 - `summaries`
 
 Each row includes:
@@ -30,12 +32,12 @@ Each row includes:
 - confidence
 - created_at
 - updated_at
-- supersedes
+- supersedes (where applicable)
 
 ## Query path
 
-1. exact scope filter (task/session/scope)
-2. FTS retrieval
+1. exact scope filter (`task_id`, `session_key`, `scope`) first
+2. FTS retrieval second
 3. sort by recency + confidence
 4. return structured rows, not only prose
 
@@ -43,13 +45,42 @@ Each row includes:
 
 - facts are written separately from summaries
 - task states are isolated by task_id
+- events capture per-conversation validated milestones
 - summaries never overwrite facts
 - future conflict detection can compare rows with same key/task_id
 
-## Why this is fast
+## Write strategy
+
+### immediate writes
+Use for:
+- validated facts
+- task state transitions
+- explicit user preferences
+- successful / failed execution events
+
+### delayed finalization
+Use for:
+- case summaries
+- stage summaries
+- task completion summaries
+- repeated successful patterns
+
+This avoids long-term memory becoming a raw transcript dump.
+
+## Why this stays fast
 
 - SQLite local file
 - FTS5 in-process
 - no network
 - no embedding model in MVP
-- explicit scopes reduce search space
+- exact scope filters reduce search space before FTS
+- indexes on task/session/scope/updated_at
+
+## Operational rule
+
+Default retrieval should be:
+- task-scoped when task exists
+- session-scoped when session context exists
+- global only when necessary
+
+This is a hard performance and accuracy rule, not just a suggestion.
