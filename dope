@@ -560,6 +560,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     tenant_info = tenant_subparsers.add_parser("info")
     tenant_info.add_argument("selector")
+    tenant_info.add_argument("--json", action="store_true")
     tenant_info.set_defaults(handler=cmd_tenant_info)
 
     tenant_renew = tenant_subparsers.add_parser("renew")
