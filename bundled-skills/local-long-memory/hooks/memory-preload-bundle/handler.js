@@ -3,7 +3,6 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 const HOOK_KEY = 'memory-preload-bundle';
-const DEFAULT_DB = '/root/.openclaw/skills/local-long-memory/data/memory.db';
 const DEFAULTS = {
   enabled: true,
   recentMessages: 4,
@@ -23,6 +22,15 @@ function isAgentBootstrapEvent(event) {
 function getHookConfig(cfg) {
   const entries = cfg?.hooks?.internal?.entries;
   return { ...DEFAULTS, ...(entries?.[HOOK_KEY] || {}) };
+}
+
+function resolveWorkspace(context) {
+  return String(context?.workspaceDir || process.env.OPENCLAW_WORKSPACE || '/root/.openclaw');
+}
+
+function resolveMemoryDbPath(context, cfg) {
+  const workspace = resolveWorkspace(context);
+  return String(cfg?.memoryDbPath || `${workspace}/skills/local-long-memory/data/memory.db`);
 }
 
 function isLikelyDirectSession(sessionKey) {
@@ -332,7 +340,7 @@ export default async function memoryPreloadBundleHook(event) {
   if (cfg.dmOnly && !isLikelyDirectSession(event.sessionKey)) return;
   if (!Array.isArray(context.bootstrapFiles) || !context.bootstrapFiles.some((f) => f?.name === 'MEMORY.md' && !f.missing)) return;
 
-  const workspaceDir = context.workspaceDir || '/root/.openclaw';
+  const workspaceDir = resolveWorkspace(context);
   const agentId = context.agentId || 'main';
   const sessionsDir = path.join(workspaceDir, 'agents', agentId, 'sessions');
   const sessionFile = context.sessionId ? path.join(sessionsDir, `${context.sessionId}.jsonl`) : null;
@@ -340,7 +348,7 @@ export default async function memoryPreloadBundleHook(event) {
   const queryText = recentTexts.join('\n').trim();
   if (!queryText) return;
 
-  const db = openDb(cfg.memoryDbPath || DEFAULT_DB);
+  const db = openDb(resolveMemoryDbPath(context, cfg));
   if (!db) return;
 
   try {

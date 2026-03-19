@@ -7,8 +7,8 @@ OPENCLAW_NPM_PACKAGE="${OPENCLAW_NPM_PACKAGE:-openclaw@latest}"
 CODEX_NPM_PACKAGE="${CODEX_NPM_PACKAGE:-@openai/codex@latest}"
 PROVIDER="default"
 WORKSPACE="${OPENCLAW_WORKSPACE:-$HOME/.openclaw}"
-SKILLS_DIR="$HOME/.openclaw/skills"
-HOOKS_DIR="$HOME/.openclaw/hooks"
+SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-$WORKSPACE/skills}"
+HOOKS_DIR="${OPENCLAW_HOOKS_DIR:-$WORKSPACE/hooks}"
 BUNDLED_SKILLS_DIR="${BUNDLED_SKILLS_DIR:-$SCRIPT_DIR/bundled-skills}"
 AGILE_CODEX_RUNTIME_DIR="${AGILE_CODEX_RUNTIME_DIR:-$SKILLS_DIR/agile-codex/runtime}"
 AGILE_CODEX_MONITOR_NAME="${AGILE_CODEX_MONITOR_NAME:-Agile Codex progress monitor}"
@@ -572,8 +572,41 @@ PY
         "default/gpt-5.4": {}
       },
       "workspace": "__WORKSPACE__",
+      "contextTokens": 90000,
+      "contextPruning": {
+        "mode": "cache-ttl",
+        "ttl": "3m",
+        "keepLastAssistants": 2,
+        "softTrimRatio": 0.2,
+        "hardClearRatio": 0.35,
+        "minPrunableToolChars": 20000,
+        "tools": {
+          "deny": ["browser", "canvas"]
+        },
+        "softTrim": {
+          "maxChars": 2500,
+          "headChars": 900,
+          "tailChars": 900
+        },
+        "hardClear": {
+          "enabled": true,
+          "placeholder": "[Old tool result content cleared]"
+        }
+      },
       "compaction": {
-        "mode": "safeguard"
+        "mode": "safeguard",
+        "reserveTokens": 52000,
+        "keepRecentTokens": 5000,
+        "reserveTokensFloor": 46000,
+        "maxHistoryShare": 0.25,
+        "recentTurnsPreserve": 3,
+        "memoryFlush": {
+          "enabled": true,
+          "softThresholdTokens": 20000,
+          "forceFlushTranscriptBytes": "500kb",
+          "prompt": "Before heavy compaction, write only durable notes to memory/YYYY-MM-DD.md when warranted. Then reply with NO_REPLY unless there is truly necessary user-visible output.",
+          "systemPrompt": "Session is approaching aggressive compaction. Persist only durable user/project facts, remain silent to the user, and avoid verbose output."
+        }
       },
       "timeoutSeconds": 900,
       "maxConcurrent": 16,
@@ -596,6 +629,13 @@ PY
   },
   "session": {
     "dmScope": "per-channel-peer"
+  },
+  "cron": {
+    "sessionRetention": "24h",
+    "runLog": {
+      "maxBytes": 2000000,
+      "keepLines": 2000
+    }
   },
   "hooks": {
     "internal": {
@@ -673,6 +713,7 @@ write_openclaw_config() {
   local gateway_bind="${OPENCLAW_GATEWAY_BIND:-loopback}"
   local gateway_allowed_origins_json="${OPENCLAW_GATEWAY_ALLOWED_ORIGINS_JSON:-}"
   local gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
+  local gateway_token="${OPENCLAW_GATEWAY_TOKEN:-}"
   python3 - <<PY
 import json
 from pathlib import Path
@@ -685,6 +726,8 @@ model_name = ${MODEL_NAME@Q}
 gateway_bind = ${gateway_bind@Q}
 gateway_allowed_origins_json = ${gateway_allowed_origins_json@Q}
 gateway_port = int(${gateway_port@Q})
+gateway_token_env = ${gateway_token@Q}
+import secrets
 cfg = json.loads(cfg_path.read_text())
 provider_cfg = cfg.setdefault('models', {}).setdefault('providers', {}).setdefault(provider, {})
 cfg['models']['mode'] = 'merge'
@@ -717,6 +760,50 @@ cfg.setdefault('commands', {}).update({
   'ownerDisplay': 'raw',
 })
 cfg.setdefault('session', {})['dmScope'] = 'per-channel-peer'
+cron = cfg.setdefault('cron', {})
+cron['sessionRetention'] = '24h'
+run_log = cron.setdefault('runLog', {})
+run_log['maxBytes'] = 2000000
+run_log['keepLines'] = 2000
+agents['contextTokens'] = 90000
+context_pruning = agents.setdefault('contextPruning', {})
+context_pruning['mode'] = 'cache-ttl'
+context_pruning['ttl'] = '3m'
+context_pruning['keepLastAssistants'] = 2
+context_pruning['softTrimRatio'] = 0.2
+context_pruning['hardClearRatio'] = 0.35
+context_pruning['minPrunableToolChars'] = 20000
+tools_cfg = context_pruning.setdefault('tools', {})
+tools_cfg['deny'] = ['browser', 'canvas']
+soft_trim = context_pruning.setdefault('softTrim', {})
+soft_trim['maxChars'] = 2500
+soft_trim['headChars'] = 900
+soft_trim['tailChars'] = 900
+hard_clear = context_pruning.setdefault('hardClear', {})
+hard_clear['enabled'] = True
+hard_clear['placeholder'] = '[Old tool result content cleared]'
+compaction = agents.setdefault('compaction', {})
+compaction['mode'] = 'safeguard'
+compaction['reserveTokens'] = 52000
+compaction['keepRecentTokens'] = 5000
+compaction['reserveTokensFloor'] = 46000
+compaction['maxHistoryShare'] = 0.25
+compaction['recentTurnsPreserve'] = 3
+memory_flush = compaction.setdefault('memoryFlush', {})
+memory_flush['enabled'] = True
+memory_flush['softThresholdTokens'] = 20000
+memory_flush['forceFlushTranscriptBytes'] = '500kb'
+memory_flush['prompt'] = 'Before heavy compaction, write only durable notes to memory/YYYY-MM-DD.md when warranted. Then reply with NO_REPLY unless there is truly necessary user-visible output.'
+memory_flush['systemPrompt'] = 'Session is approaching aggressive compaction. Persist only durable user/project facts, remain silent to the user, and avoid verbose output.'
+heartbeat = agents.setdefault('heartbeat', {})
+heartbeat['every'] = '30m'
+heartbeat['target'] = 'none'
+heartbeat['lightContext'] = True
+heartbeat['ackMaxChars'] = 120
+active_hours = heartbeat.setdefault('activeHours', {})
+active_hours['start'] = '00:00'
+active_hours['end'] = '24:00'
+active_hours['timezone'] = 'UTC'
 hooks = cfg.setdefault('hooks', {}).setdefault('internal', {})
 hooks['enabled'] = True
 hook_entries = hooks.setdefault('entries', {})
@@ -755,7 +842,12 @@ if not isinstance(allowed_origins, list) or not allowed_origins:
   ]
 gateway.setdefault('controlUi', {})['allowedOrigins'] = allowed_origins
 gateway.setdefault('auth', {})['mode'] = 'token'
-gateway['auth'].setdefault('token', 'openclaw-local-token')
+auth = gateway.setdefault('auth', {})
+current_token = str(auth.get('token') or '').strip()
+if gateway_token_env:
+  auth['token'] = gateway_token_env
+elif not current_token or current_token == 'openclaw-local-token':
+  auth['token'] = secrets.token_urlsafe(24)
 gateway.setdefault('tailscale', {})['mode'] = 'off'
 gateway['tailscale'].setdefault('resetOnExit', False)
 gateway.setdefault('nodes', {})['denyCommands'] = [
@@ -805,19 +897,27 @@ install_local_skills() {
     exit 1
   fi
   mkdir -p "$SKILLS_DIR"
-  rm -rf "$SKILLS_DIR/using-superpowers" "$SKILLS_DIR/agile-codex" "$SKILLS_DIR/browser-use" "$SKILLS_DIR/local-long-memory"
-  cp -a "$BUNDLED_SKILLS_DIR/using-superpowers" "$SKILLS_DIR/using-superpowers"
-  cp -a "$BUNDLED_SKILLS_DIR/agile-codex" "$SKILLS_DIR/agile-codex"
-  cp -a "$BUNDLED_SKILLS_DIR/browser-use" "$SKILLS_DIR/browser-use"
-  cp -a "$BUNDLED_SKILLS_DIR/local-long-memory" "$SKILLS_DIR/local-long-memory"
   mkdir -p "$HOOKS_DIR"
-  rm -rf "$HOOKS_DIR/memory-preload-bundle"
+
+  sync_tree() {
+    local src="$1"
+    local dst="$2"
+    mkdir -p "$(dirname "$dst")"
+    rm -rf "$dst.tmp-sync"
+    cp -a "$src" "$dst.tmp-sync"
+    rm -rf "$dst"
+    mv "$dst.tmp-sync" "$dst"
+  }
+
+  sync_tree "$BUNDLED_SKILLS_DIR/using-superpowers" "$SKILLS_DIR/using-superpowers"
+  sync_tree "$BUNDLED_SKILLS_DIR/agile-codex" "$SKILLS_DIR/agile-codex"
+  sync_tree "$BUNDLED_SKILLS_DIR/browser-use" "$SKILLS_DIR/browser-use"
+  sync_tree "$BUNDLED_SKILLS_DIR/local-long-memory" "$SKILLS_DIR/local-long-memory"
   if [[ -d "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-preload-bundle" ]]; then
-    cp -a "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-preload-bundle" "$HOOKS_DIR/memory-preload-bundle"
+    sync_tree "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-preload-bundle" "$HOOKS_DIR/memory-preload-bundle"
   fi
-  rm -rf "$HOOKS_DIR/memory-auto-capture"
   if [[ -d "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-auto-capture" ]]; then
-    cp -a "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-auto-capture" "$HOOKS_DIR/memory-auto-capture"
+    sync_tree "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-auto-capture" "$HOOKS_DIR/memory-auto-capture"
   fi
   find "$SKILLS_DIR/agile-codex/scripts" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} +
   find "$SKILLS_DIR/local-long-memory/scripts" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} + 2>/dev/null || true
@@ -901,6 +1001,9 @@ cfg_path = Path(${CONFIG_PATH@Q})
 cfg = json.loads(cfg_path.read_text())
 channels = cfg.setdefault('channels', {})
 feishu = channels.setdefault('feishu', {})
+feishu['connectionMode'] = 'websocket'
+feishu['domain'] = 'feishu'
+feishu['dmHistoryLimit'] = 12
 feishu['dmPolicy'] = 'open'
 feishu['allowFrom'] = ['*']
 cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n')

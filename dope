@@ -354,6 +354,23 @@ def cmd_host_create(args: argparse.Namespace) -> int:
     return run_installer(args, env_updates)
 
 
+def cmd_host_sync_memory_runtime(args: argparse.Namespace) -> int:
+    workspace = str(Path(args.workspace or os.environ.get('OPENCLAW_WORKSPACE') or (Path.home() / '.openclaw')).expanduser())
+    env_updates = {
+        'INSTALL_MODE': 'admin',
+        'OPENCLAW_WORKSPACE': workspace,
+        'OPENCLAW_CONFIG_PATH': str(Path(workspace) / 'openclaw.json'),
+        'TENANT_NONINTERACTIVE': '1',
+    }
+    if args.base_url:
+        env_updates['TENANT_BASE_URL'] = args.base_url
+    if args.api_key:
+        env_updates['TENANT_API_KEY'] = args.api_key
+    if args.model:
+        env_updates['TENANT_MODEL'] = args.model
+    return run_installer(args, env_updates)
+
+
 def cmd_tenant_create(args: argparse.Namespace) -> int:
     short_uuid = generate_short_uuid(args.short_uuid)
     duration_label, duration_seconds = duration_to_seconds(args.duration, None)
@@ -532,6 +549,15 @@ def build_parser() -> argparse.ArgumentParser:
     host_create.add_argument("--dry-run", action="store_true")
     host_create.add_argument("--json", action="store_true")
     host_create.set_defaults(handler=cmd_host_create)
+
+    host_sync_memory = host_subparsers.add_parser("sync-memory-runtime")
+    host_sync_memory.add_argument("--workspace")
+    host_sync_memory.add_argument("--base-url")
+    host_sync_memory.add_argument("--api-key")
+    host_sync_memory.add_argument("--model")
+    host_sync_memory.add_argument("--dry-run", action="store_true")
+    host_sync_memory.add_argument("--json", action="store_true")
+    host_sync_memory.set_defaults(handler=cmd_host_sync_memory_runtime)
 
     tenant_parser = subparsers.add_parser("tenant")
     tenant_subparsers = tenant_parser.add_subparsers(dest="command", required=True)

@@ -3,7 +3,6 @@ import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 
 const HOOK_KEY = 'memory-auto-capture';
-const DEFAULT_DB = '/root/.openclaw/skills/local-long-memory/data/memory.db';
 const DEFAULTS = {
   enabled: true,
   dmOnly: true,
@@ -18,21 +17,32 @@ function getCfg(cfg) {
   return { ...DEFAULTS, ...(entries?.[HOOK_KEY] || {}) };
 }
 
+function resolveWorkspace(event) {
+  return String(event?.context?.workspaceDir || process.env.OPENCLAW_WORKSPACE || '/root/.openclaw');
+}
+
+function resolveMemoryPaths(event, cfg) {
+  const workspace = resolveWorkspace(event);
+  const dbPath = String(cfg?.memoryDbPath || `${workspace}/skills/local-long-memory/data/memory.db`);
+  const scriptPath = String(cfg?.memoryScriptPath || `${workspace}/skills/local-long-memory/scripts/memory_core.py`);
+  return { workspace, dbPath, scriptPath };
+}
+
 function isDirectMessageContext(event) {
   const key = String(event?.sessionKey || '').toLowerCase();
   return key.includes(':user:') || key.includes(':dm:') || key.includes(':direct:') || key.startsWith('agent:main:feishu:user:');
 }
 
-function runMemory(args, cwd = '/root/.openclaw') {
-  return spawnSync('python3', ['/root/.openclaw/skills/local-long-memory/scripts/memory_core.py', ...args], {
-    cwd,
+function runMemory(args, paths) {
+  return spawnSync('python3', [paths.scriptPath, ...args], {
+    cwd: paths.workspace,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
 
-function runMemoryJson(args, cwd = '/root/.openclaw') {
-  const proc = runMemory(args, cwd);
+function runMemoryJson(args, paths) {
+  const proc = runMemory(args, paths);
   try {
     return JSON.parse(proc.stdout || '{}');
   } catch {
@@ -40,7 +50,7 @@ function runMemoryJson(args, cwd = '/root/.openclaw') {
   }
 }
 
-function openDb(dbPath = DEFAULT_DB) {
+function openDb(dbPath) {
   if (!dbPath || !fs.existsSync(dbPath)) return null;
   try {
     return new DatabaseSync(dbPath, { open: true, readOnly: true });
@@ -147,13 +157,13 @@ function isRecentDuplicate(db, table, fields, dedupeWindowSec) {
   }
 }
 
-function putFactWithSupersede(fact, sessionKey, taskId) {
-  const current = runMemoryJson(['get-current-fact', '--key', fact.stableKey, '--session-key', sessionKey, '--task-id', taskId, '--scope-mode', 'exact']);
+function putFactWithSupersede(fact, sessionKey, taskId, paths) {
+  const current = runMemoryJson(['get-current-fact', '--key', fact.stableKey, '--session-key', sessionKey, '--task-id', taskId, '--scope-mode', 'exact'], paths);
   const args = ['put-fact', '--key', fact.stableKey, '--value', fact.value, '--source', 'message:preprocessed', '--session-key', sessionKey, '--task-id', taskId, '--confidence', '0.9'];
   if (current && current.id && current.value !== fact.value) {
     args.push('--supersedes', String(current.id));
   }
-  runMemory(args);
+  runMemory(args, paths);
 }
 
 function handleMessagePreprocessed(event) {
@@ -163,10 +173,11 @@ function handleMessagePreprocessed(event) {
   if (cfg.dmOnly && !isDirectMessageContext(event)) return;
 
   const text = sanitize(event.context?.bodyForAgent || event.context?.content || event.context?.body || '', cfg.maxTextLength);
+  const paths = resolveMemoryPaths(event, cfg);
   if (!text) return;
 
   const sessionKey = String(event.sessionKey || '');
-  const db = openDb();
+  const db = openDb(paths.dbPath);
   const taskId = deriveTaskId(text, db, cfg.maxTaskCandidates);
 
   try {
@@ -175,7 +186,7 @@ function handleMessagePreprocessed(event) {
       const isDup = isRecentDuplicate(db, 'facts', { key: fact.stableKey, value: fact.value, session_key: sessionKey }, cfg.dedupeWindowSec)
         || isRecentDuplicate(db, 'facts', { key: fact.stableKey, value: fact.value, task_id: taskId }, cfg.dedupeWindowSec);
       if (!isDup) {
-        putFactWithSupersede(fact, sessionKey, taskId);
+        putFactWithSupersede(fact, sessionKey, taskId, paths);
       }
     }
 
@@ -184,7 +195,7 @@ function handleMessagePreprocessed(event) {
       const isDup = isRecentDuplicate(db, 'events', { event_type: eventCapture.type, value: eventCapture.value, session_key: sessionKey }, cfg.dedupeWindowSec)
         || isRecentDuplicate(db, 'events', { event_type: eventCapture.type, value: eventCapture.value, task_id: taskId }, cfg.dedupeWindowSec);
       if (!isDup) {
-        runMemory(['put-event', '--event-type', eventCapture.type, '--value', eventCapture.value, '--source', 'message:preprocessed', '--session-key', sessionKey, '--task-id', taskId, '--confidence', eventCapture.confidence]);
+        runMemory(['put-event', '--event-type', eventCapture.type, '--value', eventCapture.value, '--source', 'message:preprocessed', '--session-key', sessionKey, '--task-id', taskId, '--confidence', eventCapture.confidence], paths);
       }
     }
   } finally {
@@ -203,12 +214,12 @@ function handleSessionCompactAfter(event) {
   if (!sessionKey) return;
 
   const summaryText = sanitize(event.context?.summary || event.context?.compactionSummary || 'session compacted', cfg.maxTextLength);
-  const db = openDb();
+  const db = openDb(paths.dbPath);
   try {
     const isDup = isRecentDuplicate(db, 'summaries', { value: summaryText, session_key: sessionKey }, cfg.dedupeWindowSec)
       || (taskId ? isRecentDuplicate(db, 'summaries', { value: summaryText, task_id: taskId }, cfg.dedupeWindowSec) : false);
     if (!isDup) {
-      runMemory(['put-summary', '--task-id', taskId, '--value', summaryText, '--source', 'session:compact:after', '--session-key', sessionKey, '--confidence', '0.6']);
+      runMemory(['put-summary', '--task-id', taskId, '--value', summaryText, '--source', 'session:compact:after', '--session-key', sessionKey, '--confidence', '0.6'], paths);
     }
   } finally {
     try { db?.close(); } catch {}
