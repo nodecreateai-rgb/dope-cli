@@ -110,6 +110,7 @@ metadata: {"openclaw":{"emoji":"🎨","os":["linux","darwin"]}}
   - 模型名
   - prompt
   - 输出路径
+- 如果当前运行环境已经在 `openclaw.json` 里配置了 provider 的 `baseUrl` / `apiKey` / `models[0].id`，脚本会自动复用这些默认值；在 tenant proxy 模式下，这意味着图片生成会自动走租户代理，不需要把真实上游地址或真实 key 再显式传给脚本。
 
 ## Feishu 场景补充
 

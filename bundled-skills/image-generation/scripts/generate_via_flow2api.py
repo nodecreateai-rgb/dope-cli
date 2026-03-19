@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
 from urllib import error, request
 
+DEFAULT_CONFIG_PATH = os.environ.get("OPENCLAW_CONFIG_PATH", str(Path.home() / ".openclaw" / "openclaw.json"))
 DEFAULT_BASE_URL = "http://127.0.0.1:38080"
 DEFAULT_MODEL = "gemini-3.1-flash-image-square"
 RATIO_MODEL_MAP = {
@@ -23,6 +25,56 @@ RATIO_MODEL_MAP = {
 def normalize_base_url(raw: str) -> str:
     text = (raw or "").strip().rstrip("/")
     return text or DEFAULT_BASE_URL
+
+
+def load_openclaw_provider_defaults(config_path: str = DEFAULT_CONFIG_PATH) -> dict:
+    path = Path(config_path)
+    if not path.exists():
+        return {}
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    models = cfg.get("models") or {}
+    providers = models.get("providers") or {}
+    provider_name = (models.get("default") or models.get("provider") or "default")
+    provider_cfg = providers.get(provider_name) or providers.get("default") or {}
+    model_name = ""
+    model_list = provider_cfg.get("models") or []
+    if model_list and isinstance(model_list[0], dict):
+        model_name = str(model_list[0].get("id") or "").strip()
+    return {
+        "base_url": str(provider_cfg.get("baseUrl") or "").strip(),
+        "api_key": str(provider_cfg.get("apiKey") or "").strip(),
+        "model": model_name,
+    }
+
+
+def resolve_runtime_defaults() -> dict:
+    cfg = load_openclaw_provider_defaults()
+    base_url = (
+        os.environ.get("IMAGE_GENERATION_BASE_URL")
+        or os.environ.get("FLOW2API_BASE_URL")
+        or cfg.get("base_url")
+        or DEFAULT_BASE_URL
+    )
+    api_key = (
+        os.environ.get("IMAGE_GENERATION_API_KEY")
+        or os.environ.get("FLOW2API_API_KEY")
+        or cfg.get("api_key")
+        or ""
+    )
+    model = (
+        os.environ.get("IMAGE_GENERATION_MODEL")
+        or os.environ.get("FLOW2API_MODEL")
+        or cfg.get("model")
+        or ""
+    )
+    return {
+        "base_url": normalize_base_url(base_url),
+        "api_key": api_key,
+        "model": model,
+    }
 
 
 def read_prompt(args: argparse.Namespace) -> str:
@@ -49,10 +101,13 @@ def normalize_ratio(raw: str) -> str:
     return aliases.get(text, text)
 
 
-def pick_model(requested_model: str, ratio: str) -> tuple[str, str | None]:
+def pick_model(requested_model: str, ratio: str, default_model: str) -> tuple[str, str | None]:
     model = (requested_model or "").strip()
     if model:
         return model, None
+    configured_default = (default_model or "").strip()
+    if configured_default:
+        return configured_default, None
     suffix = RATIO_MODEL_MAP.get(ratio or "", "square")
     chosen = f"gemini-3.1-flash-image-{suffix}"
     note = None
@@ -125,9 +180,10 @@ def save_text(path: str | None, text: str) -> None:
 
 
 def main() -> None:
+    runtime_defaults = resolve_runtime_defaults()
     parser = argparse.ArgumentParser(description="Generate images through Flow2API/OpenAI-compatible image endpoint")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--api-key", required=True)
+    parser.add_argument("--base-url", default=runtime_defaults["base_url"])
+    parser.add_argument("--api-key", default=runtime_defaults["api_key"])
     parser.add_argument("--model", default="")
     parser.add_argument("--ratio", default="")
     parser.add_argument("--prompt", default="")
@@ -137,13 +193,16 @@ def main() -> None:
     parser.add_argument("--list-models", action="store_true")
     args = parser.parse_args()
 
+    if not args.api_key:
+        raise SystemExit("api key is required; pass --api-key or configure OpenClaw provider/api env vars")
+
     if args.list_models:
         print(json.dumps(list_models(args.base_url, args.api_key), ensure_ascii=False, indent=2))
         return
 
     prompt = read_prompt(args)
     ratio = normalize_ratio(args.ratio)
-    model, fallback_note = pick_model(args.model, ratio)
+    model, fallback_note = pick_model(args.model, ratio, runtime_defaults["model"])
     final_prompt = enhance_prompt(prompt, ratio, args.style)
 
     payload = {
@@ -162,6 +221,7 @@ def main() -> None:
         "fallbackNote": fallback_note,
         "imageUrl": image_url,
         "rawContent": content,
+        "baseUrlSource": args.base_url,
     }
     if args.out:
         save_text(args.out, json.dumps(result, ensure_ascii=False, indent=2) + "\n")
