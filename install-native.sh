@@ -827,6 +827,7 @@ skills.setdefault('using-superpowers', {})['enabled'] = True
 skills.setdefault('agile-codex', {})['enabled'] = True
 skills.setdefault('browser-use', {})['enabled'] = True
 skills.setdefault('local-long-memory', {})['enabled'] = True
+skills.setdefault('image-generation', {})['enabled'] = True
 gateway = cfg.setdefault('gateway', {})
 gateway['port'] = gateway_port
 gateway['mode'] = 'local'
@@ -892,7 +893,7 @@ EOF
 }
 
 install_local_skills() {
-  if [[ ! -d "$BUNDLED_SKILLS_DIR/using-superpowers" || ! -d "$BUNDLED_SKILLS_DIR/agile-codex" || ! -d "$BUNDLED_SKILLS_DIR/browser-use" || ! -d "$BUNDLED_SKILLS_DIR/local-long-memory" ]]; then
+  if [[ ! -d "$BUNDLED_SKILLS_DIR/using-superpowers" || ! -d "$BUNDLED_SKILLS_DIR/agile-codex" || ! -d "$BUNDLED_SKILLS_DIR/browser-use" || ! -d "$BUNDLED_SKILLS_DIR/local-long-memory" || ! -d "$BUNDLED_SKILLS_DIR/image-generation" ]]; then
     echo "missing bundled skills under $BUNDLED_SKILLS_DIR" >&2
     exit 1
   fi
@@ -913,6 +914,7 @@ install_local_skills() {
   sync_tree "$BUNDLED_SKILLS_DIR/agile-codex" "$SKILLS_DIR/agile-codex"
   sync_tree "$BUNDLED_SKILLS_DIR/browser-use" "$SKILLS_DIR/browser-use"
   sync_tree "$BUNDLED_SKILLS_DIR/local-long-memory" "$SKILLS_DIR/local-long-memory"
+  sync_tree "$BUNDLED_SKILLS_DIR/image-generation" "$SKILLS_DIR/image-generation"
   if [[ -d "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-preload-bundle" ]]; then
     sync_tree "$BUNDLED_SKILLS_DIR/local-long-memory/hooks/memory-preload-bundle" "$HOOKS_DIR/memory-preload-bundle"
   fi
@@ -924,6 +926,31 @@ install_local_skills() {
   find "$SKILLS_DIR/local-long-memory/tests" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} + 2>/dev/null || true
   mkdir -p "$AGILE_CODEX_RUNTIME_DIR"
   echo "installed local skills into $SKILLS_DIR"
+}
+
+eager_init_local_long_memory() {
+  local memory_script="$SKILLS_DIR/local-long-memory/scripts/memory_core.py"
+  local memory_db="$SKILLS_DIR/local-long-memory/data/memory.db"
+  local init_log="/tmp/local-long-memory-init.log"
+
+  if [[ ! -f "$memory_script" ]]; then
+    echo "local-long-memory core script missing: $memory_script" >&2
+    exit 1
+  fi
+
+  if ! python3 "$memory_script" context >"$init_log" 2>&1; then
+    echo "local-long-memory eager initialization failed" >&2
+    tail -n 80 "$init_log" >&2 || true
+    exit 1
+  fi
+
+  if [[ ! -f "$memory_db" ]]; then
+    echo "local-long-memory eager initialization did not create database: $memory_db" >&2
+    tail -n 80 "$init_log" >&2 || true
+    exit 1
+  fi
+
+  echo "initialized local-long-memory database at $memory_db"
 }
 
 write_browser_use_skill_config() {
@@ -1446,6 +1473,7 @@ PY
   test -f "$SKILLS_DIR/local-long-memory/SKILL.md"
   test -f "$SKILLS_DIR/agile-codex/scripts/agile_codex_backend.py"
   test -f "$SKILLS_DIR/local-long-memory/scripts/memory_core.py"
+  test -f "$SKILLS_DIR/local-long-memory/data/memory.db"
   openclaw agent --agent main -m "Reply with exactly INSTALLER_SMOKE_OK and nothing else." --json --timeout 60 >/tmp/openclaw-native-smoke.json 2>&1 || true
   tail -n 40 /tmp/openclaw-native-smoke.json
   openclaw cron list --json >/tmp/openclaw-native-cron.json 2>&1 || true
@@ -1495,6 +1523,7 @@ main() {
   run_doctor_fix
   restart_gateway_after_feishu_config
   install_local_skills
+  eager_init_local_long_memory
   write_browser_use_skill_config
   configure_agile_codex_runtime
   install_progress_monitor

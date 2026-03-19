@@ -19,7 +19,20 @@
 - 加测试 / e2e / CI / code review
 - 长时间后台编码 / tmux / Codex / BMAD
 
-### 2. Feishu 任务
+### 2. 图片生成任务
+优先路由到 `image-generation`，典型触发词：
+- 生成图片 / 出图 / 画一张图
+- 海报 / 封面 / 横版图 / 竖版图 / banner / KV
+- 信息图 / 插画 / 配图 / 视觉稿 / 小红书封面
+- 用 3.1 模型 / flash-image / pro-image
+- 再来一版 / 继续迭代图片 / 换风格 / 换比例
+
+补充判断：
+- 如果是“开发图片生成功能/接口/脚本” → `agile-codex`
+- 如果是“浏览器里登录某网站出图” → `browser-docker-use`
+- 如果是“把现有图片发到飞书” → `feishu-media-send`
+
+### 3. Feishu 任务
 根据上下文路由：
 - 文档 / docx / 评论 → `feishu-doc`
 - drive / 文件夹 / 云空间 → `feishu-drive`
@@ -27,14 +40,15 @@
 - wiki / 知识库 → `feishu-wiki`
 - 任务 / task / subtasks → `feishu-task`
 - urgent / buzz / 催办 → `feishu-urgent`
+- 图片/媒体直接发送 → `feishu-media-send`
 
-### 3. 机器安全/巡检
+### 4. 机器安全/巡检
 - 安全审计 / SSH / firewall / 更新加固 → `healthcheck`
 
-### 4. 技能设计
+### 5. 技能设计
 - 创建 skill / 修改 skill / 包装 skill → `skill-creator`
 
-### 5. 天气
+### 6. 天气
 - 天气 / 温度 / forecast → `weather`
 
 ## Coordination rules
@@ -57,6 +71,7 @@
 典型例子：
 - 先 `browser-use` 登录/取页面信息，再交给 `agile-codex` 实现
 - 先 `feishu-doc` 读文档，再交给 `agile-codex` 生成/修改配套代码
+- 先 `image-generation` 出图，再交给 `feishu-media-send` 发图
 
 ### C. 并行规则
 只有在以下条件同时满足时才并发：
@@ -64,10 +79,6 @@
 - 不共享脆弱状态（如同一登录态、同一临时文件、同一会话锁）
 - 不因先后顺序不同而影响结果
 - 并发后仍能清晰汇总
-
-典型例子：
-- `browser-use` 采集公开页面信息，同时 `agile-codex` 在本地改与采集无关的代码
-- 一个子任务查资料，另一个子任务整理已有本地文档
 
 ### D. 必须先澄清的情况
 遇到以下情况，不要自主硬协调，先确认：

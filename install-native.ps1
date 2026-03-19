@@ -730,6 +730,7 @@ function Write-OpenClawConfig {
   (Ensure-Map -Parent $skills -Key 'agile-codex')['enabled'] = $true
   (Ensure-Map -Parent $skills -Key 'browser-use')['enabled'] = $true
   (Ensure-Map -Parent $skills -Key 'local-long-memory')['enabled'] = $true
+  (Ensure-Map -Parent $skills -Key 'image-generation')['enabled'] = $true
 
   $gatewayBind = if ($script:GatewayBind) { $script:GatewayBind } else { 'loopback' }
   $gatewayPort = $script:GatewayPort
@@ -813,11 +814,12 @@ function Install-LocalSkills {
   $agile = Join-Path $script:BundledSkillsDir 'agile-codex'
   $browser = Join-Path $script:BundledSkillsDir 'browser-use'
   $memory = Join-Path $script:BundledSkillsDir 'local-long-memory'
-  if (-not (Test-Path $using) -or -not (Test-Path $agile) -or -not (Test-Path $browser) -or -not (Test-Path $memory)) {
+  $image = Join-Path $script:BundledSkillsDir 'image-generation'
+  if (-not (Test-Path $using) -or -not (Test-Path $agile) -or -not (Test-Path $browser) -or -not (Test-Path $memory) -or -not (Test-Path $image)) {
     throw "missing bundled skills under $script:BundledSkillsDir"
   }
   New-Item -ItemType Directory -Force -Path $script:SkillsDir | Out-Null
-  foreach ($skill in @('using-superpowers', 'agile-codex', 'browser-use', 'local-long-memory')) {
+  foreach ($skill in @('using-superpowers', 'agile-codex', 'browser-use', 'local-long-memory', 'image-generation')) {
     $target = Join-Path $script:SkillsDir $skill
     if (Test-Path $target) {
       Remove-Item -Recurse -Force -Path $target
@@ -827,6 +829,7 @@ function Install-LocalSkills {
   Copy-Item -Recurse -Force -Path $agile -Destination (Join-Path $script:SkillsDir 'agile-codex')
   Copy-Item -Recurse -Force -Path $browser -Destination (Join-Path $script:SkillsDir 'browser-use')
   Copy-Item -Recurse -Force -Path $memory -Destination (Join-Path $script:SkillsDir 'local-long-memory')
+  Copy-Item -Recurse -Force -Path $image -Destination (Join-Path $script:SkillsDir 'image-generation')
 }
 
 function Write-BrowserUseSkillConfig {

@@ -1,6 +1,6 @@
 ---
 name: using-superpowers
-description: 全局技能路由与能力识别器。用于先判断用户意图，再把任务交给最合适的具体 skill，必要时进行多-skill 协调。适用于“应该用哪个 skill”“请自动选择合适能力”“识别这是开发任务/Feishu任务/天气/安全/技能设计”“这个需求要不要并发/串行协同”等场景。对软件开发执行类请求，优先识别并路由到 agile-codex；对需要长期记忆、多会话一致性、任务状态追踪的请求，优先结合 local-long-memory；对 Feishu 文档、权限、知识库、任务、媒体发送等请求，路由到对应的 Feishu skill。必要时先确认 OpenClaw 版本与能力再决策。
+description: 全局技能路由与能力识别器。用于先判断用户意图，再把任务交给最合适的具体 skill，必要时进行多-skill 协调。适用于“应该用哪个 skill”“请自动选择合适能力”“识别这是开发任务/Feishu任务/天气/安全/技能设计/图片生成”“这个需求要不要并发/串行协同”等场景。对软件开发执行类请求，优先识别并路由到 agile-codex；对需要长期记忆、多会话一致性、任务状态追踪的请求，优先结合 local-long-memory；对图片生成/海报/封面/信息图/插画请求，优先路由到 image-generation；对 Feishu 文档、权限、知识库、任务、媒体发送等请求，路由到对应的 Feishu skill。必要时先确认 OpenClaw 版本与能力再决策。
 metadata: {"openclaw":{"emoji":"🧭","os":["linux","darwin"]}}
 ---
 
@@ -46,26 +46,23 @@ metadata: {"openclaw":{"emoji":"🧭","os":["linux","darwin"]}}
 - 成功/失败经验积累
 - 为后续会话保留结构化事实
 
-#### 使用原则
+### 3) 图片生成请求优先路由到 image-generation
 
-- **不要**把整个聊天原文一股脑塞进长期记忆。
-- 对**已验证事实**、**任务状态变化**、**成功/失败事件**进行快速结构化写入。
-- 对**阶段总结**、**案例抽象**、**任务完结总结**延迟固化。
-- 查询时优先：
-  1. `task_id`
-  2. `session_key`
-  3. `scope`
-  4. 最后才是全局宽搜
+当用户是在让你：
+- 生成一张图 / 画一张图 / 出图
+- 做海报、封面、banner、KV、信息图、插画、配图
+- 做小红书封面、社媒图片、公众号首图、短视频封面
+- 用 `3.1`、`flash-image`、`pro-image` 等图像模型出图
+- 在已有图片基础上“再来一版”“换个风格”“换比例”“继续迭代”
 
-#### 这条是硬规则
+优先使用 `image-generation`。
 
-为了保证**快和准**：
-- 先 scoped query，再 wider search
-- 结果集默认保持小
-- summary 不是事实源
-- facts 优先于 summaries
+补充规则：
+- 如果用户是要**写代码接入图片生成功能**，仍优先 `agile-codex`
+- 如果用户是要**登录网页工具手动出图**，优先 `browser-docker-use`
+- 如果用户已经有图片文件，只是要**发到飞书会话**，优先 `feishu-media-send`
 
-### 3) Feishu 类请求路由到对应 skill
+### 4) Feishu 类请求路由到对应 skill
 
 - 文档 → `feishu-doc`
 - 云盘/文件夹 → `feishu-drive`
@@ -73,8 +70,9 @@ metadata: {"openclaw":{"emoji":"🧭","os":["linux","darwin"]}}
 - wiki/知识库 → `feishu-wiki`
 - task → `feishu-task`
 - urgent/buzz → `feishu-urgent`
+- 图片/视频/音频/文档直接发到飞书会话 → `feishu-media-send`
 
-### 4) 多-skill 协调只在必要时启用
+### 5) 多-skill 协调只在必要时启用
 
 只有满足下列任一条件时，才进入多-skill 协调：
 - 用户目标明显跨多个能力域，单一 skill 无法闭环
@@ -84,14 +82,14 @@ metadata: {"openclaw":{"emoji":"🧭","os":["linux","darwin"]}}
 
 如果一个 skill 就能高质量完成，就不要为了“显得智能”而强行协调。
 
-### 5) 协调决策规则
+### 6) 协调决策规则
 
 - **单 skill**：一个 skill 能闭环，就直接交给它。
 - **串行**：后一步依赖前一步结果时，按顺序移交；前一步没完成，不启动后一步。
 - **并行**：子任务彼此独立、不会共享易变状态、不会因为顺序不同影响结果时，才并发。
 - **先澄清**：目标不清、外部副作用敏感、需要账号/验证码/发布/删除/付款等动作时，先问清再协调。
 
-### 6) 精准而不是贪心
+### 7) 精准而不是贪心
 
 - 如果只有一个 skill 明显匹配，就用它。
 - 如果多个 skill 可能匹配，选最具体的。
@@ -99,7 +97,7 @@ metadata: {"openclaw":{"emoji":"🧭","os":["linux","darwin"]}}
 - 不要为了并发而并发；不依赖才并发。
 - 不要为了“自动化”而跳过敏感确认。
 
-### 7) 版本感知
+### 8) 版本感知
 
 当出现这些情况时，先确认 OpenClaw 版本：
 - 用户提到 using-superpowers 的兼容性
