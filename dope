@@ -485,7 +485,8 @@ def cmd_tenant_info(args: argparse.Namespace) -> int:
 def cmd_tenant_renew(args: argparse.Namespace) -> int:
     tenant = find_tenant(args.selector)
     payload = tenant["payload"]
-    if tenant["disabled"] and not args.allow_disabled:
+    was_disabled = bool(tenant["disabled"])
+    if was_disabled and not args.allow_disabled:
         raise SystemExit("tenant is already disabled; renew only extends active tenants unless --allow-disabled is set")
 
     renewal_label, duration_seconds = duration_to_seconds(args.duration, args.seconds)
@@ -510,20 +511,43 @@ def cmd_tenant_renew(args: argparse.Namespace) -> int:
     updated["lastRenewalDurationLabel"] = renewal_label
     updated["renewalCount"] = int(updated.get("renewalCount") or 0) + 1
 
+    disabled_at_path = state_dir / "disabled-at"
+    data_dir = Path(str(payload.get("dataDir") or ""))
+    tenant_disabled_path = data_dir / "TENANT_DISABLED" if data_dir else None
+
     if args.dry_run:
-        print(json.dumps({
+        dry_payload = {
             "tenant": updated.get("tenant"),
             "shortUuid": tenant["shortUuid"],
             "schedulerCommand": scheduler_args,
             "expiresAt": updated["expiresAt"],
             "delaySeconds": delay_seconds,
-        }, ensure_ascii=False, indent=2))
+        }
+        if was_disabled and args.allow_disabled:
+            dry_payload["clearsDisabled"] = True
+            dry_payload["disabledMarkers"] = [
+                str(disabled_at_path),
+                str(tenant_disabled_path) if tenant_disabled_path else "",
+            ]
+        print(json.dumps(dry_payload, ensure_ascii=False, indent=2))
         return 0
 
     proc = subprocess.run(scheduler_args, cwd=REPO_ROOT, check=False)
     if proc.returncode != 0:
         return proc.returncode
     write_json(Path(str(tenant["path"])), updated)
+    if was_disabled and args.allow_disabled:
+        try:
+            disabled_at_path.unlink(missing_ok=True)
+        except TypeError:
+            if disabled_at_path.exists():
+                disabled_at_path.unlink()
+        if tenant_disabled_path:
+            try:
+                tenant_disabled_path.unlink(missing_ok=True)
+            except TypeError:
+                if tenant_disabled_path.exists():
+                    tenant_disabled_path.unlink()
     if args.json:
         print(json.dumps(updated, ensure_ascii=False, indent=2))
     else:
