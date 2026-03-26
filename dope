@@ -482,12 +482,92 @@ def cmd_tenant_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def stop_existing_expiry(payload: dict[str, Any], state_dir: Path) -> tuple[str, str]:
+    expiry_mode = str(payload.get("expiryMode") or "")
+    expiry_unit = str(payload.get("expiryUnit") or "")
+    expiry_pid = state_dir / "expiry.pid"
+    expiry_mode_file = state_dir / "expiry.mode"
+    expiry_unit_file = state_dir / "expiry.unit"
+
+    if not expiry_unit and expiry_unit_file.exists():
+        expiry_unit = (expiry_unit_file.read_text(encoding="utf-8") or "").strip()
+
+    if expiry_unit and shutil.which("systemctl") and os.environ.get("XDG_RUNTIME_DIR"):
+        subprocess.run(["systemctl", "--user", "stop", f"{expiry_unit}.timer"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(["systemctl", "--user", "stop", f"{expiry_unit}.service"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(["systemctl", "--user", "disable", f"{expiry_unit}.timer"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(["systemctl", "--user", "reset-failed", f"{expiry_unit}.timer", f"{expiry_unit}.service"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+    if expiry_pid.exists():
+        try:
+            pid_value = expiry_pid.read_text(encoding="utf-8").strip()
+            if pid_value:
+                os.kill(int(pid_value), 15)
+        except Exception:
+            pass
+
+    for marker in (
+        expiry_pid,
+        state_dir / "expiry.log",
+        state_dir / "expiry-schedule.log",
+        state_dir / "expiry-run.log",
+        expiry_mode_file,
+        expiry_unit_file,
+    ):
+        try:
+            marker.unlink(missing_ok=True)
+        except TypeError:
+            if marker.exists():
+                marker.unlink()
+
+    return expiry_mode, expiry_unit
+
+
+def cmd_tenant_unexpire(args: argparse.Namespace) -> int:
+    tenant = find_tenant(args.selector)
+    payload = tenant["payload"]
+    state_dir = Path(str(tenant["stateDir"]))
+    previous_expiry = str(payload.get("expiresAt") or "")
+    previous_mode, previous_unit = stop_existing_expiry(payload, state_dir)
+
+    updated = dict(payload)
+    updated["shortUuid"] = tenant["shortUuid"]
+    updated["expiresAt"] = ""
+    updated["expiryMode"] = "manual"
+    updated["expiryUnit"] = ""
+
+    dry_payload = {
+        "tenant": updated.get("tenant"),
+        "shortUuid": tenant["shortUuid"],
+        "expiresAt": updated["expiresAt"],
+        "expiryMode": updated["expiryMode"],
+        "expiryUnit": updated["expiryUnit"],
+        "clearedExpiry": True,
+        "previousExpiresAt": previous_expiry,
+        "previousExpiryMode": previous_mode,
+        "previousExpiryUnit": previous_unit,
+    }
+    if args.dry_run:
+        print(json.dumps(dry_payload, ensure_ascii=False, indent=2))
+        return 0
+
+    write_json(Path(str(tenant["path"])), updated)
+    if args.json:
+        print(json.dumps(updated, ensure_ascii=False, indent=2))
+    else:
+        print(f"tenant {updated.get('tenant')} ({tenant['shortUuid']}) no longer expires automatically")
+    return 0
+
+
 def cmd_tenant_renew(args: argparse.Namespace) -> int:
     tenant = find_tenant(args.selector)
     payload = tenant["payload"]
     was_disabled = bool(tenant["disabled"])
     if was_disabled and not args.allow_disabled:
         raise SystemExit("tenant is already disabled; renew only extends active tenants unless --allow-disabled is set")
+
+    if args.forever:
+        return cmd_tenant_unexpire(args)
 
     renewal_label, duration_seconds = duration_to_seconds(args.duration, args.seconds)
     now = utc_now()
@@ -535,6 +615,10 @@ def cmd_tenant_renew(args: argparse.Namespace) -> int:
     proc = subprocess.run(scheduler_args, cwd=REPO_ROOT, check=False)
     if proc.returncode != 0:
         return proc.returncode
+    expiry_mode_path = state_dir / "expiry.mode"
+    expiry_unit_path = state_dir / "expiry.unit"
+    updated["expiryMode"] = (expiry_mode_path.read_text(encoding="utf-8").strip() if expiry_mode_path.exists() else "")
+    updated["expiryUnit"] = (expiry_unit_path.read_text(encoding="utf-8").strip() if expiry_unit_path.exists() else "")
     write_json(Path(str(tenant["path"])), updated)
     if was_disabled and args.allow_disabled:
         try:
@@ -618,11 +702,18 @@ def build_parser() -> argparse.ArgumentParser:
     renewal_amount = tenant_renew.add_mutually_exclusive_group(required=True)
     renewal_amount.add_argument("-d", "--duration")
     renewal_amount.add_argument("--seconds", type=int)
+    renewal_amount.add_argument("--forever", action="store_true")
     tenant_renew.add_argument("--from-now", action="store_true")
     tenant_renew.add_argument("--allow-disabled", action="store_true")
     tenant_renew.add_argument("--dry-run", action="store_true")
     tenant_renew.add_argument("--json", action="store_true")
     tenant_renew.set_defaults(handler=cmd_tenant_renew)
+
+    tenant_unexpire = tenant_subparsers.add_parser("unexpire")
+    tenant_unexpire.add_argument("selector")
+    tenant_unexpire.add_argument("--dry-run", action="store_true")
+    tenant_unexpire.add_argument("--json", action="store_true")
+    tenant_unexpire.set_defaults(handler=cmd_tenant_unexpire)
 
     return parser
 
